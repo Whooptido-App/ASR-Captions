@@ -9,6 +9,7 @@ on:
 jobs:
   build-macos:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: node20-macos-arm64
@@ -37,6 +38,8 @@ jobs:
       # --- Apple Code Signing & Notarization ---
       - name: Import signing certificate
         if: env.APPLE_CERTIFICATE_P12 != ''
+        continue-on-error: true
+        id: import-cert
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -62,9 +65,10 @@ jobs:
           rm certificate.p12
 
       - name: Sign binary
-        if: env.APPLE_CERTIFICATE_P12 != ''
+        if: steps.import-cert.outcome == 'success'
+        continue-on-error: true
+        id: sign-binary
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           codesign --force --options runtime \
@@ -75,9 +79,9 @@ jobs:
           codesign --verify --verbose dist/${{ matrix.artifact }}
 
       - name: Notarize binary
-        if: env.APPLE_CERTIFICATE_P12 != ''
+        if: steps.sign-binary.outcome == 'success'
+        continue-on-error: true
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -107,6 +111,7 @@ jobs:
 
   build-other:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
