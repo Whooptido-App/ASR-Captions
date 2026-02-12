@@ -13,55 +13,44 @@ The ASR Captions companion app runs a local speech recognition engine ([Whisper]
 
 ## Installation
 
-### macOS (Apple Silicon)
+The installer downloads the binary and registers the Chrome native messaging host automatically.
 
-1. Download `whooptido-asr-captions-macos-arm.dmg` from [Releases](https://github.com/Whooptido-App/ASR-Captions/releases/latest)
-2. Open the DMG and drag the app to Applications
-3. Open the app once — macOS will ask for permission, click **Open**
-4. Return to the Whooptido extension settings; it should detect the app
+### macOS / Linux
 
-### macOS (Intel)
+Open **Terminal** and run:
 
-1. Download `whooptido-asr-captions-macos-intel.dmg` from [Releases](https://github.com/Whooptido-App/ASR-Captions/releases/latest)
-2. Open the DMG and drag the app to Applications
-3. Open the app once — macOS will ask for permission, click **Open**
-4. Return to the Whooptido extension settings; it should detect the app
+```bash
+curl -fsSL https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/install.sh | bash
+```
 
 ### Windows
 
-1. Download `whooptido-asr-captions-windows-x64.exe` from [Releases](https://github.com/Whooptido-App/ASR-Captions/releases/latest)
-2. Run the installer and follow the prompts
-3. Return to the Whooptido extension settings; it should detect the app
+Open **PowerShell** and run:
 
-### Linux
+```powershell
+irm https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/install.ps1 | iex
+```
 
-1. Download `whooptido-asr-captions-linux-x64.AppImage` from [Releases](https://github.com/Whooptido-App/ASR-Captions/releases/latest)
-2. Make it executable: `chmod +x whooptido-asr-captions-linux-x64.AppImage`
-3. Run it once to install the native messaging host
-4. Return to the Whooptido extension settings; it should detect the app
+### After Installing
+
+1. **Restart Chrome** (close all Chrome windows and reopen)
+2. Open the Whooptido extension settings
+3. The companion app should be detected automatically
+4. Enable **Word-for-Word Captions**
 
 ## Uninstallation
 
-### macOS
+### macOS / Linux
 
-1. Delete the app from Applications
-2. Remove the native messaging host config:
-   ```
-   rm ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.whooptido.companion.json
-   ```
+```bash
+curl -fsSL https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/uninstall.sh | bash
+```
 
 ### Windows
 
-1. Use **Add or Remove Programs** in Windows Settings
-2. Search for "Whooptido" and uninstall
-
-### Linux
-
-1. Delete the AppImage file
-2. Remove the native messaging host config:
-   ```
-   rm ~/.config/google-chrome/NativeMessagingHosts/com.whooptido.companion.json
-   ```
+```powershell
+irm https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/uninstall.ps1 | iex
+```
 
 ## How It Works
 
