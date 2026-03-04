@@ -17,8 +17,10 @@ const path = require('path');
 
 // Whisper configuration
 const WHISPER_CLI = '/opt/homebrew/bin/whisper-cli';
-const MODELS_DIR = path.join(os.homedir(), 'whisper-models');
+const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
+const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo.bin');
+const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
 
 // Log file for debugging
 const LOG_FILE = path.join(os.tmpdir(), 'whooptido-companion.log');
@@ -429,6 +431,34 @@ function resumeWhisperOperation(operationKey) {
   }
 }
 
+// Migrate models from old ~/whisper-models/ to ~/.whooptido/models/ (one-time)
+function migrateOldModelsDir() {
+  try {
+    if (!fs.existsSync(OLD_MODELS_DIR)) return;
+    if (!fs.existsSync(MODELS_DIR)) {
+      fs.mkdirSync(MODELS_DIR, { recursive: true });
+    }
+    const files = fs.readdirSync(OLD_MODELS_DIR).filter(f => f.endsWith('.bin'));
+    for (const f of files) {
+      const src = path.join(OLD_MODELS_DIR, f);
+      const dst = path.join(MODELS_DIR, f);
+      if (!fs.existsSync(dst)) {
+        fs.renameSync(src, dst);
+        log('Migrated model: ' + f + ' → ' + MODELS_DIR);
+      }
+    }
+    // Remove old dir if empty (ignore .DS_Store)
+    const remaining = fs.readdirSync(OLD_MODELS_DIR).filter(f => f !== '.DS_Store');
+    if (remaining.length === 0) {
+      fs.rmSync(OLD_MODELS_DIR, { recursive: true, force: true });
+      log('Removed empty legacy models dir: ' + OLD_MODELS_DIR);
+    }
+  } catch (e) {
+    log('Model migration error (non-fatal): ' + e.message);
+  }
+}
+migrateOldModelsDir();
+
 // Use the chrome-native-messaging Transform stream pattern
 const inputStream = new nativeMessage.Input();
 const transformStream = new nativeMessage.Transform(function(msg, push, done) {
@@ -562,11 +592,176 @@ function handleMessage(msg, push, done) {
     case 'transcribe_cleanup':
       handleTranscribeCleanup(msg, push, done);
       break;
+
+    case 'uninstall':
+      handleUninstall(msg, push, done);
+      break;
       
     default:
       push({ type: 'error', error: `Unknown message type: ${msgType}` });
       done();
   }
+}
+
+/**
+ * Get the native messaging host manifest path for the current platform
+ * @returns {string}
+ */
+/**
+ * Get ALL native messaging host manifest paths for the current platform.
+ * Returns both user-level and system-level paths so uninstall cleans everything.
+ * @returns {string[]}
+ */
+function getAllNativeMessagingManifestPaths() {
+  const home = os.homedir();
+  const platform = os.platform();
+  const paths = [];
+
+  switch (platform) {
+    case 'darwin':
+      paths.push(path.join(home, 'Library', 'Application Support', 'Google', 'Chrome',
+        'NativeMessagingHosts', 'com.whooptido.companion.json'));
+      // System-wide path (may require elevated permissions)
+      paths.push('/Library/Google/Chrome/NativeMessagingHosts/com.whooptido.companion.json');
+      break;
+    case 'linux':
+      paths.push(path.join(home, '.config', 'google-chrome',
+        'NativeMessagingHosts', 'com.whooptido.companion.json'));
+      // System-wide path
+      paths.push('/etc/opt/chrome/native-messaging-hosts/com.whooptido.companion.json');
+      break;
+    case 'win32':
+      paths.push(path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'),
+        'Google', 'Chrome', 'User Data', 'NativeMessagingHosts', 'com.whooptido.companion.json'));
+      break;
+  }
+
+  return paths;
+}
+
+/**
+ * Handle self-uninstall request from the extension.
+ * Removes: native messaging manifest, whisper models, temp files, then companion directory.
+ * Sends ack response BEFORE deleting self, then exits.
+ */
+/**
+ * Handle self-uninstall request from the extension.
+ * Since all Whooptido files live under ~/.whooptido/ (binary, models, logs),
+ * uninstall is straightforward: remove NM manifests, clean temp files,
+ * send ack, then rm -rf the entire Whooptido directory.
+ */
+function handleUninstall(msg, push, done) {
+  const errors = [];
+  const deleted = [];
+
+  // 1. Remove ALL native messaging manifests (user-level AND system-level)
+  const manifestPaths = getAllNativeMessagingManifestPaths();
+  for (const manifestPath of manifestPaths) {
+    try {
+      if (fs.existsSync(manifestPath)) {
+        fs.unlinkSync(manifestPath);
+        deleted.push('manifest: ' + manifestPath);
+        log('Uninstall: removed manifest at ' + manifestPath);
+      }
+    } catch (e) {
+      // System-level path may require root — log but don't treat as fatal
+      if (manifestPath.startsWith('/Library') || manifestPath.startsWith('/etc')) {
+        log('Uninstall: skipped system manifest (permission denied): ' + manifestPath);
+      } else {
+        errors.push('manifest: ' + e.message);
+        log('Uninstall: failed to remove manifest: ' + e.message);
+      }
+    }
+  }
+
+  // 2. Clean up temp files
+  try {
+    const tmpDir = os.tmpdir();
+    const tmpFiles = fs.readdirSync(tmpDir)
+      .filter(f => f.startsWith('whooptido-'));
+    for (const f of tmpFiles) {
+      try {
+        const fullPath = path.join(tmpDir, f);
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory()) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(fullPath);
+        }
+      } catch (e) {
+        // Best-effort cleanup — ignore individual file errors
+      }
+    }
+    if (tmpFiles.length > 0) {
+      deleted.push('temp: ' + tmpFiles.length + ' files');
+    }
+    log('Uninstall: cleaned ' + tmpFiles.length + ' temp files');
+  } catch (e) {
+    // ignore
+  }
+
+  // 3. On Windows, remove registry entry for native messaging
+  if (os.platform() === 'win32') {
+    try {
+      const { execSync } = require('child_process');
+      execSync('reg delete "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.whooptido.companion" /f', { stdio: 'pipe' });
+      deleted.push('registry: com.whooptido.companion');
+      log('Uninstall: removed registry entry');
+    } catch (e) {
+      log('Uninstall: registry removal skipped (may not exist): ' + e.message);
+    }
+  }
+
+  // 4. Clean up legacy ~/whisper-models/ directory (from pre-1.1.0 installs)
+  try {
+    if (fs.existsSync(OLD_MODELS_DIR)) {
+      fs.rmSync(OLD_MODELS_DIR, { recursive: true, force: true });
+      deleted.push('legacy models dir: ' + OLD_MODELS_DIR);
+      log('Uninstall: removed legacy models dir at ' + OLD_MODELS_DIR);
+    }
+  } catch (e) {
+    log('Uninstall: failed to remove legacy models dir: ' + e.message);
+  }
+
+  // 5. Send success ack BEFORE self-deletion
+  push({
+    type: 'uninstall_ack',
+    success: errors.length === 0,
+    errors: errors.length > 0 ? errors : undefined,
+    deleted: deleted
+  });
+  done();
+
+  // 6. Delete entire ~/.whooptido/ directory (binary, models, everything)
+  const platform = os.platform();
+
+  if (platform === 'win32') {
+    // Windows: can't delete running exe — spawn detached cleanup script
+    try {
+      const batContent = '@echo off\r\ntimeout /t 2 /nobreak >nul\r\nrmdir /s /q "' + WHOOPTIDO_DIR + '"\r\n';
+      const batPath = path.join(os.tmpdir(), 'whooptido-cleanup.bat');
+      fs.writeFileSync(batPath, batContent);
+      const { spawn } = require('child_process');
+      spawn('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore' }).unref();
+      log('Uninstall: spawned Windows cleanup script');
+    } catch (e) {
+      log('Uninstall: Windows cleanup script failed: ' + e.message);
+    }
+  } else {
+    // macOS/Linux: safe to delete self while running (inode-based filesystem)
+    try {
+      if (fs.existsSync(WHOOPTIDO_DIR)) {
+        fs.rmSync(WHOOPTIDO_DIR, { recursive: true, force: true });
+        log('Uninstall: removed ' + WHOOPTIDO_DIR);
+      }
+    } catch (e) {
+      log('Uninstall: failed to remove companion dir: ' + e.message);
+    }
+  }
+
+  // 7. Exit after a short delay to ensure ack is flushed
+  log('Uninstall: complete — exiting');
+  setTimeout(() => process.exit(0), 200);
 }
 
 /**
