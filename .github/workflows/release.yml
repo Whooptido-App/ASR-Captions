@@ -103,25 +103,79 @@ jobs:
           rm ${{ matrix.artifact }}.zip
           cd ..
 
-      - name: Upload artifact
+      # --- Build .pkg installer for macOS ---
+      - name: Build .pkg installer
+        run: |
+          # Create staging payload
+          mkdir -p pkg-root/usr/local/whooptido-staging
+          cp dist/${{ matrix.artifact }} pkg-root/usr/local/whooptido-staging/whooptido-asr-captions
+          chmod +x pkg-root/usr/local/whooptido-staging/whooptido-asr-captions
+
+          # Extract version from tag (strip 'v' prefix)
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION:-1.0.0}"
+
+          # Build the .pkg
+          pkgbuild \
+            --root pkg-root \
+            --identifier com.whooptido.asr-captions \
+            --version "$VERSION" \
+            --install-location / \
+            --scripts scripts/macos-pkg \
+            dist/${{ matrix.artifact }}.pkg
+
+          echo "Built: dist/${{ matrix.artifact }}.pkg"
+          ls -la dist/${{ matrix.artifact }}.pkg
+
+      - name: Sign .pkg installer
+        if: steps.import-cert.outcome == 'success'
+        continue-on-error: true
+        env:
+          APPLE_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+        run: |
+          # Sign .pkg with installer identity (if available)
+          # Falls back to unsigned pkg if APPLE_INSTALLER_IDENTITY is not set
+          if [ -n "$APPLE_INSTALLER_IDENTITY" ]; then
+            productsign --sign "$APPLE_INSTALLER_IDENTITY" \
+              dist/${{ matrix.artifact }}.pkg \
+              dist/${{ matrix.artifact }}-signed.pkg
+            mv dist/${{ matrix.artifact }}-signed.pkg dist/${{ matrix.artifact }}.pkg
+            echo "Signed .pkg installer"
+          else
+            echo "No installer signing identity — using unsigned .pkg"
+          fi
+
+      - name: Notarize .pkg installer
+        if: steps.sign-binary.outcome == 'success'
+        continue-on-error: true
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit dist/${{ matrix.artifact }}.pkg \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait || true
+
+          # Staple the notarization ticket to the .pkg
+          xcrun stapler staple dist/${{ matrix.artifact }}.pkg || true
+
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
 
-  build-other:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: node20-win-x64
-            artifact: whooptido-asr-captions-windows-x64
-          - os: ubuntu-latest
-            target: node20-linux-x64
-            artifact: whooptido-asr-captions-linux-x64
+      - name: Upload .pkg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-pkg
+          path: dist/${{ matrix.artifact }}.pkg
 
-    runs-on: ${{ matrix.os }}
+  build-windows:
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -135,16 +189,55 @@ jobs:
         run: npm ci
 
       - name: Build binary
-        run: npx pkg native-host.js --target ${{ matrix.target }} --output dist/${{ matrix.artifact }}
+        run: npx pkg native-host.js --target node20-win-x64 --output dist/whooptido-asr-captions-windows-x64
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if (-not $version) { $version = "1.0.0" }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion="$version" scripts\windows-installer.iss
+        shell: pwsh
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whooptido-asr-captions-windows-x64
+          path: dist/whooptido-asr-captions-windows-x64*
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whooptido-asr-captions-windows-x64-setup
+          path: Output/whooptido-asr-captions-windows-x64-setup.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build binary
+        run: npx pkg native-host.js --target node20-linux-x64 --output dist/whooptido-asr-captions-linux-x64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}*
+          name: whooptido-asr-captions-linux-x64
+          path: dist/whooptido-asr-captions-linux-x64
 
   release:
-    needs: [build-macos, build-other]
+    needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -165,7 +258,7 @@ jobs:
           find artifacts -type f | while read f; do
             cp "$f" release-assets/
           done
-          # Include installer scripts
+          # Include installer scripts (fallback for Linux & advanced users)
           cp scripts/install.sh release-assets/
           cp scripts/install.ps1 release-assets/
           cp scripts/uninstall.sh release-assets/
@@ -181,3 +274,12 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+          body: |
+            ## Installation
+
+            **macOS (Apple Silicon):** Download `whooptido-asr-captions-macos-arm.pkg` and double-click to install.
+            **macOS (Intel):** Download `whooptido-asr-captions-macos-intel.pkg` and double-click to install.
+            **Windows:** Download `whooptido-asr-captions-windows-x64-setup.exe` and run the installer.
+            **Linux:** Run: `curl -fsSL https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/install.sh | bash`
+
+            After installing, restart Chrome and enable Word-for-Word Captions in the Whooptido extension settings.

@@ -1,0 +1,63 @@
+#!/bin/bash
+# Whooptido ASR Captions — macOS .pkg postinstall script
+# This runs after pkgbuild installs files to the staging location.
+# It moves the binary to the user's home directory and creates the NM manifest.
+
+set -euo pipefail
+
+HOST_NAME="com.whooptido.companion"
+BINARY_NAME="whooptido-asr-captions"
+EXTENSION_ID="iabpcgbkbkkeokigbgogggaoejnbkikn"
+STAGING_DIR="/usr/local/whooptido-staging"
+
+# --- Determine the real user (postinstall runs as root) ---
+if [ -n "${USER:-}" ] && [ "$USER" != "root" ]; then
+    REAL_USER="$USER"
+elif [ -n "${SUDO_USER:-}" ]; then
+    REAL_USER="$SUDO_USER"
+else
+    # macOS: get the console user
+    REAL_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
+fi
+
+if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+    echo "ERROR: Could not determine the real user. Aborting."
+    exit 1
+fi
+
+REAL_HOME=$(eval echo "~$REAL_USER")
+INSTALL_DIR="$REAL_HOME/.whooptido"
+NM_DIR="$REAL_HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
+
+echo "Installing Whooptido ASR Captions for user: $REAL_USER"
+
+# --- Move binary from staging to install dir ---
+mkdir -p "$INSTALL_DIR"
+cp "$STAGING_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
+chmod +x "$INSTALL_DIR/$BINARY_NAME"
+chown "$REAL_USER" "$INSTALL_DIR/$BINARY_NAME"
+chown "$REAL_USER" "$INSTALL_DIR"
+echo "Binary installed: $INSTALL_DIR/$BINARY_NAME"
+
+# --- Create Chrome native messaging manifest ---
+mkdir -p "$NM_DIR"
+cat > "$NM_DIR/$HOST_NAME.json" << EOF
+{
+  "name": "$HOST_NAME",
+  "description": "Whooptido ASR Captions Companion",
+  "path": "$INSTALL_DIR/$BINARY_NAME",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://$EXTENSION_ID/"
+  ]
+}
+EOF
+chown "$REAL_USER" "$NM_DIR/$HOST_NAME.json"
+echo "NM manifest created: $NM_DIR/$HOST_NAME.json"
+
+# --- Clean up staging directory ---
+rm -rf "$STAGING_DIR"
+echo "Staging directory cleaned up."
+
+echo "Installation complete! Restart Chrome to use Whooptido ASR Captions."
+exit 0
