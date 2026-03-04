@@ -22,7 +22,7 @@ DisableProgramGroupPage=yes
 DisableDirPage=yes
 DisableWelcomePage=no
 WizardStyle=modern
-SetupIconFile=
+OutputDir=..\Output
 ; No start menu or desktop shortcut — this is a background service
 CreateUninstallRegKey=yes
 
@@ -30,7 +30,7 @@ CreateUninstallRegKey=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "dist\whooptido-asr-captions-windows-x64.exe"; DestDir: "{app}"; DestName: "whooptido-asr-captions.exe"; Flags: ignoreversion
+Source: "..\dist\whooptido-asr-captions-windows-x64.exe"; DestDir: "{app}"; DestName: "whooptido-asr-captions.exe"; Flags: ignoreversion
 
 [Registry]
 ; Register the native messaging host with Chrome
