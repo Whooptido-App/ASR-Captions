@@ -58,10 +58,11 @@ begin
     
     ManifestContent := TStringList.Create;
     try
+      StringChangeEx(BinaryPath, '\', '\\', True);
       ManifestContent.Add('{');
       ManifestContent.Add('  "name": "com.whooptido.companion",');
       ManifestContent.Add('  "description": "Whooptido ASR Captions Companion",');
-      ManifestContent.Add('  "path": "' + StringReplace(BinaryPath, '\', '\\', [rfReplaceAll]) + '",');
+      ManifestContent.Add('  "path": "' + BinaryPath + '",');
       ManifestContent.Add('  "type": "stdio",');
       ManifestContent.Add('  "allowed_origins": [');
       ManifestContent.Add('    "chrome-extension://iabpcgbkbkkeokigbgogggaoejnbkikn/"');
