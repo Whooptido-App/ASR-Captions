@@ -42,10 +42,14 @@ jobs:
         id: import-cert
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          # Decode certificate
+          # Decode certificates
           echo "$APPLE_CERTIFICATE_P12" | base64 --decode > certificate.p12
+          if [ -n "$APPLE_INSTALLER_CERT_P12" ]; then
+            echo "$APPLE_INSTALLER_CERT_P12" | base64 --decode > installer.p12
+          fi
 
           # Create temporary keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
@@ -54,15 +58,22 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Import certificate
+          # Import Application certificate
           security import certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            
+          # Import Installer certificate (if available)
+          if [ -f installer.p12 ]; then
+            security import installer.p12 -P "$APPLE_CERTIFICATE_PASSWORD" \
+              -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          fi
+            
           security set-key-partition-list -S apple-tool:,apple: \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
 
           # Clean up
-          rm certificate.p12
+          rm -f certificate.p12 installer.p12
 
       - name: Sign binary
         if: steps.import-cert.outcome == 'success'
