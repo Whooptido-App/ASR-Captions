@@ -21,6 +21,22 @@ const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
+const HOST_VERSION = '1.0.0-beta.8';
+const MODEL_QUALITY_RANK = Object.freeze({
+  'small': 100,
+  'medium': 200,
+  'large-v3': 300,
+  'large-v3-turbo': 400
+});
+const MODEL_FILENAME_TO_ID = Object.freeze({
+  'ggml-small.bin': 'small',
+  'ggml-small-q5_1.bin': 'small',
+  'ggml-medium.bin': 'medium',
+  'ggml-medium-q5_0.bin': 'medium',
+  'ggml-large-v3.bin': 'large-v3',
+  'ggml-large-v3-turbo.bin': 'large-v3-turbo',
+  'ggml-large-v3-turbo-q5_0.bin': 'large-v3-turbo'
+});
 
 // Log file for debugging
 const LOG_FILE = path.join(os.tmpdir(), 'whooptido-companion.log');
@@ -47,6 +63,55 @@ function resolveModelPath(model, modelId) {
     if (fs.existsSync(possiblePath)) return possiblePath;
   }
   return DEFAULT_MODEL;
+}
+
+function getModelRank(modelId) {
+  return MODEL_QUALITY_RANK[modelId] || 0;
+}
+
+function getPlatformId() {
+  const platform = os.platform();
+  const arch = os.arch();
+
+  if (platform === 'darwin') {
+    return arch === 'arm64' ? 'macos-arm' : 'macos-intel';
+  }
+  if (platform === 'win32') {
+    return 'windows-x64';
+  }
+  if (platform === 'linux') {
+    return 'linux-x64';
+  }
+  return `${platform}-${arch}`;
+}
+
+function listInstalledModels() {
+  try {
+    if (!fs.existsSync(MODELS_DIR)) {
+      return [];
+    }
+
+    return fs.readdirSync(MODELS_DIR)
+      .filter((filename) => filename.endsWith('.bin'))
+      .map((filename) => {
+        const modelPath = path.join(MODELS_DIR, filename);
+        const stats = fs.statSync(modelPath);
+        const id = MODEL_FILENAME_TO_ID[filename] || filename.replace(/^ggml-/, '').replace(/\.bin$/, '');
+
+        return {
+          id,
+          name: id,
+          fileName: filename,
+          path: modelPath,
+          size: stats.size,
+          qualityRank: getModelRank(id)
+        };
+      })
+      .sort((a, b) => (b.qualityRank || 0) - (a.qualityRank || 0) || (b.size || 0) - (a.size || 0));
+  } catch (error) {
+    log('Error listing installed models: ' + error.message);
+    return [];
+  }
 }
 
 // DTW preset mapping for token-level timestamps
@@ -537,7 +602,7 @@ function handleMessage(msg, push, done) {
   
   switch (msgType) {
     case 'ping':
-      push({ type: 'pong', version: '1.0.0' });
+      push({ type: 'pong', version: HOST_VERSION });
       done();
       break;
       
@@ -768,32 +833,46 @@ function handleUninstall(msg, push, done) {
  * Check if whisper-cli and models are available
  */
 function handleStatus(push) {
+  let whisperInstalled = false;
+  let whisperError = null;
+
   try {
     execSync(`${WHISPER_CLI} --help`, { stdio: 'pipe' });
-    const modelExists = fs.existsSync(DEFAULT_MODEL);
-    
-    // Detect GPU backend
-    const gpuBackend = detectGpuBackend();
-    
-    push({
-      type: 'status',
-      whisperInstalled: true,
-      modelInstalled: modelExists,
-      modelPath: DEFAULT_MODEL,
-      modelsDir: MODELS_DIR,
-      version: '1.0.0',
-      gpuBackend: gpuBackend
-    });
-    log('Status check: whisper installed, model=' + modelExists + ', gpu=' + gpuBackend);
+    whisperInstalled = true;
   } catch (e) {
-    push({
-      type: 'status',
-      whisperInstalled: false,
-      error: e.message,
-      version: '1.0.0',
-      gpuBackend: 'unknown'
-    });
-    log('Status check: whisper not found - ' + e.message);
+    whisperError = e.message;
+  }
+
+  const models = listInstalledModels();
+  const activeModel = models[0] || null;
+  const gpuBackend = whisperInstalled ? detectGpuBackend() : 'unknown';
+  const health = whisperInstalled ? 'ok' : 'degraded';
+  const installState = whisperInstalled ? 'installed' : 'installed-degraded';
+
+  push({
+    type: 'status',
+    installed: true,
+    reachable: true,
+    protocolVersion: 2,
+    hostVersion: HOST_VERSION,
+    version: HOST_VERSION,
+    platform: getPlatformId(),
+    installState,
+    health,
+    whisperInstalled,
+    modelInstalled: models.length > 0,
+    modelPath: activeModel?.path || DEFAULT_MODEL,
+    modelsDir: MODELS_DIR,
+    models,
+    activeModelId: activeModel?.id || null,
+    gpuBackend,
+    errors: whisperError ? [whisperError] : []
+  });
+
+  if (whisperInstalled) {
+    log('Status check: host reachable, whisper installed, models=' + models.length + ', gpu=' + gpuBackend);
+  } else {
+    log('Status check: host reachable, whisper missing - ' + whisperError);
   }
 }
 
@@ -864,21 +943,7 @@ function detectGpuBackend() {
  */
 function handleListModels(push) {
   try {
-    if (!fs.existsSync(MODELS_DIR)) {
-      push({ type: 'models', models: [] });
-      return;
-    }
-    
-    const files = fs.readdirSync(MODELS_DIR).filter(f => f.endsWith('.bin'));
-    const models = files.map(f => {
-      const fullPath = path.join(MODELS_DIR, f);
-      return {
-        name: f.replace('ggml-', '').replace('.bin', ''),
-        path: fullPath,
-        size: fs.statSync(fullPath).size
-      };
-    });
-    
+    const models = listInstalledModels();
     push({ type: 'models', models });
     log(`Listed ${models.length} models`);
   } catch (e) {
