@@ -187,6 +187,14 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_CODESIGN_ENDPOINT: https://eus.codesigning.azure.net/
+      AZURE_CODESIGN_ACCOUNT_NAME: Whooptido
+      AZURE_CODESIGN_PROFILE_NAME: whooptido-windows-public
 
     steps:
       - uses: actions/checkout@v4
@@ -202,6 +210,35 @@ jobs:
       - name: Build binary
         run: npx pkg native-host.js --target node20-win-x64 --output dist/whooptido-asr-captions-windows-x64
 
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows binary
+        uses: azure/artifact-signing-action@v1
+        with:
+          endpoint: ${{ env.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_CODESIGN_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.AZURE_CODESIGN_PROFILE_NAME }}
+          files: |
+            ${{ github.workspace }}\dist\whooptido-asr-captions-windows-x64.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
@@ -211,6 +248,28 @@ jobs:
           if (-not $version) { $version = "1.0.0" }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion="$version" scripts\windows-installer.iss
         shell: pwsh
+
+      - name: Sign Windows installer
+        uses: azure/artifact-signing-action@v1
+        with:
+          endpoint: ${{ env.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_CODESIGN_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.AZURE_CODESIGN_PROFILE_NAME }}
+          files: |
+            ${{ github.workspace }}\Output\whooptido-asr-captions-windows-x64-setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
