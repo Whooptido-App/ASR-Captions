@@ -4,6 +4,7 @@ node_modules/
 # Build output
 dist/
 build/
+Output/
 
 # OS files
 .DS_Store
@@ -18,6 +19,14 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Secrets and certificates
+secrets/
+*.p12
+*.pfx
+*.cer
+*.key
+*.pem
 
 # Logs
 *.log
