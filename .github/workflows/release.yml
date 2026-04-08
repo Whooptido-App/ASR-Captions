@@ -6,6 +6,9 @@ on:
       - 'v*'  # Triggered on version tag push (e.g., v1.0.0)
   workflow_dispatch:  # Allow manual trigger for testing
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-macos:
     strategy:
@@ -211,7 +214,7 @@ jobs:
         run: npx pkg native-host.js --target node20-win-x64 --output dist/whooptido-asr-captions-windows-x64
 
       - name: Azure login
-        uses: azure/login@v1
+        uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
