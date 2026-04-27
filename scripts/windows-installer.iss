@@ -9,9 +9,11 @@
 [Setup]
 AppName=Whooptido ASR Captions
 AppVersion={#AppVersion}
+AppVerName=Whooptido ASR Captions {#AppVersion}
 AppPublisher=Whooptido
-AppPublisherURL=https://whooptido.com
+AppPublisherURL=https://whooptido.app
 AppSupportURL=https://github.com/Whooptido-App/ASR-Captions
+AppUpdatesURL=https://github.com/Whooptido-App/ASR-Captions/releases
 DefaultDirName={localappdata}\Whooptido
 OutputBaseFilename=whooptido-asr-captions-windows-x64-setup
 Compression=lzma
@@ -25,12 +27,20 @@ WizardStyle=modern
 OutputDir=..\Output
 ; No start menu or desktop shortcut — this is a background service
 CreateUninstallRegKey=yes
+VersionInfoCompany=Whooptido
+VersionInfoDescription=Whooptido ASR Captions Installer
+VersionInfoOriginalFileName=whooptido-asr-captions-windows-x64-setup.exe
+VersionInfoProductName=Whooptido ASR Captions
+VersionInfoProductTextVersion={#AppVersion}
+VersionInfoTextVersion={#AppVersion}
+; SignedUninstaller requires an Inno SignTool during compile. The GitHub workflow currently signs the finished setup EXE after compile, so uninstaller signing is tracked in the rollout plan instead of being enabled here.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "..\dist\whooptido-asr-captions-windows-x64.exe"; DestDir: "{app}"; DestName: "whooptido-asr-captions.exe"; Flags: ignoreversion
+Source: "..\dist\whisper-runtime\*"; DestDir: "{app}\whisper"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 ; Register the native messaging host with Chrome

@@ -245,6 +245,29 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
+      - name: Download whisper.cpp Windows runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-bin-x64.zip'
+          $extractPath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-bin-x64'
+          $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime'
+
+          Invoke-WebRequest `
+            -Uri 'https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip' `
+            -OutFile $zipPath `
+            -UseBasicParsing
+
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+          New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
+          Copy-Item -Path (Join-Path $extractPath 'Release\*') -Destination $runtimePath -Recurse -Force
+
+          if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'whisper-cli.exe'))) {
+            throw 'whisper-cli.exe was not found in whisper.cpp runtime package'
+          }
+
+          Get-ChildItem -LiteralPath $runtimePath | Select-Object Name,Length | Format-Table -AutoSize
+
       - name: Build Windows installer
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
@@ -274,6 +297,49 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
 
+      - name: Verify Windows signatures and hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            @{ Role = 'native-host'; Path = 'dist\whooptido-asr-captions-windows-x64.exe' },
+            @{ Role = 'installer'; Path = 'Output\whooptido-asr-captions-windows-x64-setup.exe' }
+          )
+
+          $report = foreach ($file in $files) {
+            $path = Join-Path $env:GITHUB_WORKSPACE $file.Path
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Expected Windows artifact not found: $($file.Path)"
+            }
+
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256
+            $signer = $signature.SignerCertificate
+            $timestamp = $signature.TimeStamperCertificate
+
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($file.Path): $($signature.Status) $($signature.StatusMessage)"
+            }
+
+            [pscustomobject]@{
+              role = $file.Role
+              path = $file.Path
+              sha256 = $hash.Hash.ToLowerInvariant()
+              signatureStatus = [string]$signature.Status
+              signatureStatusMessage = $signature.StatusMessage
+              signerSubject = if ($signer) { $signer.Subject } else { $null }
+              signerIssuer = if ($signer) { $signer.Issuer } else { $null }
+              signerThumbprint = if ($signer) { $signer.Thumbprint } else { $null }
+              timestampSubject = if ($timestamp) { $timestamp.Subject } else { $null }
+              timestampIssuer = if ($timestamp) { $timestamp.Issuer } else { $null }
+              timestampThumbprint = if ($timestamp) { $timestamp.Thumbprint } else { $null }
+            }
+          }
+
+          New-Item -ItemType Directory -Force -Path Output | Out-Null
+          $report | ConvertTo-Json -Depth 5 | Set-Content -Path Output\windows-signing-report.json -Encoding UTF8
+          $report | Format-Table -AutoSize
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -285,6 +351,12 @@ jobs:
         with:
           name: whooptido-asr-captions-windows-x64-setup
           path: Output/whooptido-asr-captions-windows-x64-setup.exe
+
+      - name: Upload Windows signing report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-signing-report
+          path: Output/windows-signing-report.json
 
   build-linux:
     runs-on: ubuntu-latest
@@ -356,3 +428,7 @@ jobs:
             **Linux:** Run: `curl -fsSL https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/install.sh | bash`
 
             After installing, restart Chrome and enable Word-for-Word Captions in the Whooptido extension settings.
+
+            ### Windows signing and SmartScreen
+
+            The Windows setup file is Authenticode-signed. New signed Windows installers can still show Microsoft Defender SmartScreen's "unrecognized app" prompt until the exact file hash builds reputation. Download only from this release, verify the publisher shown by Windows, and compare the SHA-256 in `windows-signing-report.json` if you need extra confirmation.

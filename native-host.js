@@ -10,18 +10,20 @@
  */
 
 const nativeMessage = require('chrome-native-messaging');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFileSync } = require('child_process');
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 
 // Whisper configuration
-const WHISPER_CLI = '/opt/homebrew/bin/whisper-cli';
+const WHISPER_CLI_ENV = 'WHOOPTIDO_WHISPER_CLI';
 const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo-q5_0.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
-const HOST_VERSION = '1.0.0-beta.8';
+const HOST_VERSION = '1.0.0-beta.10';
 const MODEL_QUALITY_RANK = Object.freeze({
   'small': 100,
   'medium': 200,
@@ -60,6 +62,62 @@ function log(message) {
 function logError(message) {
   log(message);
   process.stderr.write(`[Whooptido] ${message}\n`);
+}
+
+function getExecutableDir() {
+  if (process.pkg && process.execPath) {
+    return path.dirname(process.execPath);
+  }
+  return __dirname;
+}
+
+function getWhisperCliCandidates() {
+  const platform = os.platform();
+  const executableName = platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
+  const installDir = getExecutableDir();
+  const candidates = [];
+
+  if (process.env[WHISPER_CLI_ENV]) {
+    candidates.push(process.env[WHISPER_CLI_ENV]);
+  }
+
+  candidates.push(
+    path.join(installDir, 'whisper', executableName),
+    path.join(installDir, executableName)
+  );
+
+  if (platform === 'darwin') {
+    candidates.push('/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli');
+  } else if (platform === 'linux') {
+    candidates.push('/usr/local/bin/whisper-cli', '/usr/bin/whisper-cli');
+  }
+
+  candidates.push(executableName);
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function isExecutableCandidateAvailable(candidate) {
+  if (!candidate) return false;
+  if (candidate.includes(path.sep) || candidate.includes('/') || candidate.includes('\\')) {
+    return fs.existsSync(candidate);
+  }
+
+  try {
+    execFileSync(candidate, ['--help'], { stdio: 'pipe', timeout: 5000 });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function resolveWhisperCli() {
+  const candidates = getWhisperCliCandidates();
+  for (const candidate of candidates) {
+    if (isExecutableCandidateAvailable(candidate)) {
+      return { path: candidate, candidates };
+    }
+  }
+  return { path: null, candidates };
 }
 
 function resolveModelPath(model, modelId) {
@@ -232,7 +290,13 @@ function transcribeFileWithWhisper({
 
     const lang = language || 'auto';
     const resolvedModelPath = resolveModelPath(modelPath, modelId);
-    const outputBase = `/tmp/whooptido-transcription-${Date.now()}`;
+    const whisperInfo = resolveWhisperCli();
+    if (!whisperInfo.path) {
+      reject(new Error(`Whisper runtime not found. Checked: ${whisperInfo.candidates.join(', ')}`));
+      return;
+    }
+
+    const outputBase = path.join(os.tmpdir(), `whooptido-transcription-${Date.now()}`);
     const cpuCount = os.cpus()?.length || 4;
     const configuredMaxThreads = Math.max(
       1,
@@ -256,7 +320,7 @@ function transcribeFileWithWhisper({
     log(`Whisper args: ${args.join(' ')}`);
 
     const startTime = Date.now();
-    const whisper = spawn(WHISPER_CLI, args);
+    const whisper = spawn(whisperInfo.path, args);
     registerWhisperProcess(operationKey, whisper);
     let stderr = '';
 
@@ -865,17 +929,22 @@ function handleUninstall(msg, push, done) {
 function handleStatus(push) {
   let whisperInstalled = false;
   let whisperError = null;
+  const whisperInfo = resolveWhisperCli();
 
-  try {
-    execSync(`${WHISPER_CLI} --help`, { stdio: 'pipe' });
-    whisperInstalled = true;
-  } catch (e) {
-    whisperError = e.message;
+  if (whisperInfo.path) {
+    try {
+      execFileSync(whisperInfo.path, ['--help'], { stdio: 'pipe', timeout: 5000 });
+      whisperInstalled = true;
+    } catch (e) {
+      whisperError = e.message;
+    }
+  } else {
+    whisperError = `Whisper runtime not found. Checked: ${whisperInfo.candidates.join(', ')}`;
   }
 
   const models = listInstalledModels();
   const activeModel = models[0] || null;
-  const gpuBackend = whisperInstalled ? detectGpuBackend() : 'unknown';
+  const gpuBackend = whisperInstalled ? detectGpuBackend(whisperInfo.path) : 'unknown';
   const health = whisperInstalled ? 'ok' : 'degraded';
   const installState = whisperInstalled ? 'installed' : 'installed-degraded';
 
@@ -895,6 +964,7 @@ function handleStatus(push) {
     modelsDir: MODELS_DIR,
     models,
     activeModelId: activeModel?.id || null,
+    whisperPath: whisperInfo.path || null,
     gpuBackend,
     errors: whisperError ? [whisperError] : []
   });
@@ -910,7 +980,7 @@ function handleStatus(push) {
  * Detect the GPU backend for whisper.cpp
  * Returns: 'metal' | 'cuda' | 'vulkan' | 'cpu' | 'unknown'
  */
-function detectGpuBackend() {
+function detectGpuBackend(whisperCliPath) {
   try {
     // Check the platform first
     const platform = os.platform();
@@ -919,7 +989,7 @@ function detectGpuBackend() {
     if (platform === 'darwin') {
       // Check if Metal is available by running whisper-cli with GPU flag
       try {
-        const output = execSync(`${WHISPER_CLI} --help 2>&1`, { encoding: 'utf-8' });
+        const output = execFileSync(whisperCliPath, ['--help'], { encoding: 'utf-8', timeout: 5000 });
         // If whisper.cpp was built with Metal support, it will show in help
         if (output.includes('gpu') || output.includes('metal') || output.includes('-ng')) {
           // Check if we're on Apple Silicon
@@ -1035,11 +1105,88 @@ function handleDeleteModel(msg, push) {
   }
 }
 
+function downloadFile(url, destinationPath, expectedSize, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirectCount > 5) {
+      reject(new Error('Too many redirects while downloading model'));
+      return;
+    }
+
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(new Error(`Invalid model download URL: ${error.message}`));
+      return;
+    }
+
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      reject(new Error(`Unsupported model download protocol: ${parsedUrl.protocol}`));
+      return;
+    }
+
+    const client = parsedUrl.protocol === 'http:' ? http : https;
+    const request = client.get(parsedUrl, (response) => {
+      const statusCode = response.statusCode || 0;
+
+      if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
+        response.resume();
+        const nextUrl = new URL(response.headers.location, parsedUrl).toString();
+        downloadFile(nextUrl, destinationPath, expectedSize, redirectCount + 1).then(resolve, reject);
+        return;
+      }
+
+      if (statusCode < 200 || statusCode >= 300) {
+        response.resume();
+        reject(new Error(`Model download failed: HTTP ${statusCode}`));
+        return;
+      }
+
+      const tempPath = `${destinationPath}.part`;
+      const fileStream = fs.createWriteStream(tempPath);
+      response.pipe(fileStream);
+
+      fileStream.on('finish', () => {
+        fileStream.close(() => {
+          try {
+            const stats = fs.statSync(tempPath);
+            if (expectedSize && Math.abs(stats.size - expectedSize) > 1000) {
+              fs.unlinkSync(tempPath);
+              reject(new Error(`Model download size mismatch: expected ${expectedSize}, got ${stats.size}`));
+              return;
+            }
+
+            if (fs.existsSync(destinationPath)) {
+              fs.unlinkSync(destinationPath);
+            }
+            fs.renameSync(tempPath, destinationPath);
+            resolve(stats.size);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+
+      fileStream.on('error', (error) => {
+        try { fs.unlinkSync(tempPath); } catch (cleanupError) { /* ignore */ }
+        reject(error);
+      });
+    });
+
+    request.setTimeout(600000, () => {
+      request.destroy(new Error('Model download timeout'));
+    });
+
+    request.on('error', reject);
+  });
+}
+
 /**
  * Download a model from URL
  */
 function handleDownloadModel(msg, push, done) {
   const { modelId, url, size } = msg;
+  const expectedSize = Number.isFinite(Number(size)) ? Number(size) : null;
 
   const filename = getDownloadFilename(modelId, url);
   const modelPath = path.join(MODELS_DIR, filename);
@@ -1055,7 +1202,7 @@ function handleDownloadModel(msg, push, done) {
   // Check if already exists
   if (fs.existsSync(modelPath)) {
     const stats = fs.statSync(modelPath);
-    if (!size || Math.abs(stats.size - size) < 1000) {
+    if (!expectedSize || Math.abs(stats.size - expectedSize) < 1000) {
       push({ 
         type: 'download_complete',
         success: true, 
@@ -1068,42 +1215,42 @@ function handleDownloadModel(msg, push, done) {
     }
   }
   
-  // Download with curl
-  const curlCmd = `curl -L -f -o "${modelPath}" "${url}"`;
-  log(`Running: ${curlCmd}`);
-  
-  try {
-    execSync(curlCmd, { stdio: 'pipe', timeout: 600000 });
-    
-    if (fs.existsSync(modelPath)) {
-      const stats = fs.statSync(modelPath);
-      push({ 
-        type: 'download_complete',
-        success: true, 
-        modelId, 
-        path: modelPath,
-        size: stats.size
-      });
-      log(`Download complete: ${modelPath}`);
-    } else {
-      throw new Error('Download completed but file not found');
-    }
-  } catch (e) {
-    // Clean up partial download
+  (async () => {
     try {
-      if (fs.existsSync(modelPath)) fs.unlinkSync(modelPath);
-    } catch (cleanupErr) { /* ignore */ }
-    
-    push({ 
-      type: 'download_error',
-      success: false,
-      modelId,
-      error: e.message
-    });
-    log(`Download error: ${e.message}`);
-  }
-  
-  done();
+      const downloadedSize = await downloadFile(url, modelPath, expectedSize);
+
+      if (fs.existsSync(modelPath)) {
+        const stats = fs.statSync(modelPath);
+        const finalSize = stats.size || downloadedSize;
+        push({
+          type: 'download_complete',
+          success: true,
+          modelId,
+          path: modelPath,
+          size: finalSize
+        });
+        log(`Download complete: ${modelPath}`);
+      } else {
+        throw new Error('Download completed but file not found');
+      }
+    } catch (e) {
+      // Clean up partial download
+      try {
+        if (fs.existsSync(modelPath)) fs.unlinkSync(modelPath);
+        if (fs.existsSync(`${modelPath}.part`)) fs.unlinkSync(`${modelPath}.part`);
+      } catch (cleanupErr) { /* ignore */ }
+
+      push({ 
+        type: 'download_error',
+        success: false,
+        modelId,
+        error: e.message
+      });
+      log(`Download error: ${e.message}`);
+    } finally {
+      done();
+    }
+  })();
 }
 
 /**

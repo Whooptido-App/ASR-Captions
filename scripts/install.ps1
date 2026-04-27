@@ -3,9 +3,10 @@
 #
 # What this does:
 # 1. Downloads the Windows x64 binary from GitHub Releases
-# 2. Installs it to %LOCALAPPDATA%\Whooptido\
-# 3. Creates the native messaging host manifest
-# 4. Registers in the Windows Registry for Chrome
+# 2. Downloads the whisper.cpp runtime used by the companion
+# 3. Installs both to %LOCALAPPDATA%\Whooptido\
+# 4. Creates the native messaging host manifest
+# 5. Registers in the Windows Registry for Chrome
 
 $ErrorActionPreference = "Stop"
 
@@ -15,6 +16,7 @@ $HostName = "com.whooptido.companion"
 $InstallDir = "$env:LOCALAPPDATA\Whooptido"
 $BinaryName = "whooptido-asr-captions.exe"
 $Asset = "whooptido-asr-captions-windows-x64.exe"
+$WhisperRuntimeUrl = "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip"
 # Extension IDs allowed to connect to the native host.
 # pjac... is the current packaged/unpacked Whooptido ID; iab... is retained for older beta installs.
 $PrimaryExtensionId = "pjacfbdlalhafifgdoddiojjjeabkhcg"
@@ -43,6 +45,34 @@ try {
     Write-Ok "Binary installed: $BinaryPath"
 } catch {
     Write-Fail "Download failed. Check https://github.com/$Repo/releases for available assets."
+}
+
+# --- Download whisper.cpp runtime ---
+Write-Step "Downloading whisper.cpp runtime..."
+
+$RuntimeDir = Join-Path $InstallDir "whisper"
+$RuntimeZip = Join-Path $env:TEMP "whooptido-whisper-bin-x64.zip"
+$RuntimeExtract = Join-Path $env:TEMP "whooptido-whisper-bin-x64"
+
+try {
+  if (Test-Path -LiteralPath $RuntimeExtract) {
+    Remove-Item -LiteralPath $RuntimeExtract -Recurse -Force
+  }
+  New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+  Invoke-WebRequest -Uri $WhisperRuntimeUrl -OutFile $RuntimeZip -UseBasicParsing
+  Expand-Archive -Path $RuntimeZip -DestinationPath $RuntimeExtract -Force
+  Copy-Item -Path (Join-Path $RuntimeExtract "Release\*") -Destination $RuntimeDir -Recurse -Force
+
+  $WhisperCliPath = Join-Path $RuntimeDir "whisper-cli.exe"
+  if (-not (Test-Path -LiteralPath $WhisperCliPath)) {
+    Write-Fail "whisper-cli.exe was not found after runtime installation."
+  }
+  Write-Ok "Whisper runtime installed: $RuntimeDir"
+} catch {
+  Write-Fail "Whisper runtime download failed: $($_.Exception.Message)"
+} finally {
+  Remove-Item -LiteralPath $RuntimeZip -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $RuntimeExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --- Create native messaging host manifest ---
@@ -82,6 +112,7 @@ Write-Host "  ║   Installation complete!                 ║" -ForegroundColor
 Write-Host "  ╚══════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Binary:   $BinaryPath"
+Write-Host "  Whisper:  $RuntimeDir"
 Write-Host "  Manifest: $ManifestPath"
 Write-Host "  Registry: $RegPath"
 Write-Host ""
