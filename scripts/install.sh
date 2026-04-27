@@ -16,8 +16,10 @@ REPO="Whooptido-App/ASR-Captions"
 HOST_NAME="com.whooptido.companion"
 INSTALL_DIR="$HOME/.whooptido"
 BINARY_NAME="whooptido-asr-captions"
-# Extension ID — update this if the CWS ID changes
-EXTENSION_ID="iabpcgbkbkkeokigbgogggaoejnbkikn"
+# Extension IDs allowed to connect to the native host.
+# pjac... is the current packaged/unpacked Whooptido ID; iab... is retained for older beta installs.
+PRIMARY_EXTENSION_ID="pjacfbdlalhafifgdoddiojjjeabkhcg"
+LEGACY_EXTENSION_ID="iabpcgbkbkkeokigbgogggaoejnbkikn"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -123,7 +125,8 @@ main() {
   "path": "$INSTALL_DIR/$BINARY_NAME",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://$EXTENSION_ID/"
+    "chrome-extension://$PRIMARY_EXTENSION_ID/",
+    "chrome-extension://$LEGACY_EXTENSION_ID/"
   ]
 }
 EOF

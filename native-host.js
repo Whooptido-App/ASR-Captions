@@ -19,7 +19,7 @@ const path = require('path');
 const WHISPER_CLI = '/opt/homebrew/bin/whisper-cli';
 const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
-const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo.bin');
+const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo-q5_0.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
 const HOST_VERSION = '1.0.0-beta.8';
 const MODEL_QUALITY_RANK = Object.freeze({
@@ -36,6 +36,12 @@ const MODEL_FILENAME_TO_ID = Object.freeze({
   'ggml-large-v3.bin': 'large-v3',
   'ggml-large-v3-turbo.bin': 'large-v3-turbo',
   'ggml-large-v3-turbo-q5_0.bin': 'large-v3-turbo'
+});
+const MODEL_ID_TO_FILENAMES = Object.freeze({
+  'small': ['ggml-small.bin', 'ggml-small-q5_1.bin'],
+  'medium': ['ggml-medium.bin', 'ggml-medium-q5_0.bin'],
+  'large-v3': ['ggml-large-v3.bin'],
+  'large-v3-turbo': ['ggml-large-v3-turbo-q5_0.bin', 'ggml-large-v3-turbo.bin']
 });
 
 // Log file for debugging
@@ -83,6 +89,25 @@ function getPlatformId() {
     return 'linux-x64';
   }
   return `${platform}-${arch}`;
+}
+
+function getDownloadFilename(modelId, url) {
+  const candidateNames = MODEL_ID_TO_FILENAMES[modelId] || [];
+
+  try {
+    const downloadUrl = new URL(url);
+    const filename = path.basename(downloadUrl.pathname || '');
+    const resolvedModelId = MODEL_FILENAME_TO_ID[filename]
+      || filename.replace(/^ggml-/, '').replace(/\.bin$/, '');
+
+    if (filename.endsWith('.bin') && (resolvedModelId === modelId || candidateNames.includes(filename))) {
+      return filename;
+    }
+  } catch (error) {
+    log('Could not derive model filename from URL: ' + error.message);
+  }
+
+  return candidateNames[0] || `ggml-${modelId}.bin`;
 }
 
 function listInstalledModels() {
@@ -615,6 +640,11 @@ function handleMessage(msg, push, done) {
       handleListModels(push);
       done();
       break;
+
+    case 'delete_model':
+      handleDeleteModel(msg, push);
+      done();
+      break;
       
     case 'download_model':
       handleDownloadModel(msg, push, done);
@@ -952,19 +982,66 @@ function handleListModels(push) {
   }
 }
 
+function handleDeleteModel(msg, push) {
+  const modelId = String(msg.modelId || '').trim();
+
+  if (!modelId) {
+    push({ type: 'delete_model_ack', success: false, error: 'Missing modelId' });
+    return;
+  }
+
+  try {
+    if (!fs.existsSync(MODELS_DIR)) {
+      push({ type: 'delete_model_ack', success: true, deleted: [] });
+      return;
+    }
+
+    const candidateNames = new Set([
+      ...(MODEL_ID_TO_FILENAMES[modelId] || []),
+      `ggml-${modelId}.bin`
+    ]);
+
+    const deleted = [];
+    const presentFiles = fs.readdirSync(MODELS_DIR);
+
+    for (const fileName of presentFiles) {
+      const derivedId = MODEL_FILENAME_TO_ID[fileName] || fileName.replace(/^ggml-/, '').replace(/\.bin$/, '');
+      if (!candidateNames.has(fileName) && derivedId !== modelId) {
+        continue;
+      }
+
+      const filePath = path.join(MODELS_DIR, fileName);
+      if (!fs.existsSync(filePath)) {
+        continue;
+      }
+
+      fs.unlinkSync(filePath);
+      deleted.push(filePath);
+      log('Deleted model file: ' + filePath);
+    }
+
+    push({
+      type: 'delete_model_ack',
+      success: true,
+      deleted
+    });
+  } catch (error) {
+    log('Delete model error: ' + error.message);
+    push({
+      type: 'delete_model_ack',
+      success: false,
+      error: error.message
+    });
+  }
+}
+
 /**
  * Download a model from URL
  */
 function handleDownloadModel(msg, push, done) {
   const { modelId, url, size } = msg;
-  
-  const modelFiles = {
-    'small': 'ggml-small.bin',
-    'medium': 'ggml-medium.bin',
-    'large-v3-turbo': 'ggml-large-v3-turbo.bin'
-  };
-  
-  const filename = modelFiles[modelId] || `ggml-${modelId}.bin`;
+
+  const filename = getDownloadFilename(modelId, url);
   const modelPath = path.join(MODELS_DIR, filename);
   
   log(`Download requested: ${modelId} from ${url}`);

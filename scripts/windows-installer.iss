@@ -65,6 +65,7 @@ begin
       ManifestContent.Add('  "path": "' + BinaryPath + '",');
       ManifestContent.Add('  "type": "stdio",');
       ManifestContent.Add('  "allowed_origins": [');
+      ManifestContent.Add('    "chrome-extension://pjacfbdlalhafifgdoddiojjjeabkhcg/",');
       ManifestContent.Add('    "chrome-extension://iabpcgbkbkkeokigbgogggaoejnbkikn/"');
       ManifestContent.Add('  ]');
       ManifestContent.Add('}');

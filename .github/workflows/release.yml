@@ -36,7 +36,7 @@ jobs:
         run: npm ci
 
       - name: Build binary
-        run: npx pkg native-host.js --target ${{ matrix.target }} --output dist/${{ matrix.artifact }}
+        run: npx pkg native-host.js --target ${{ matrix.target }} --no-bytecode --public --public-packages "*" --output dist/${{ matrix.artifact }}
 
       # --- Apple Code Signing & Notarization ---
       - name: Import signing certificate
@@ -211,7 +211,7 @@ jobs:
         run: npm ci
 
       - name: Build binary
-        run: npx pkg native-host.js --target node20-win-x64 --output dist/whooptido-asr-captions-windows-x64
+        run: npx pkg native-host.js --target node20-win-x64 --no-bytecode --public --public-packages "*" --output dist/whooptido-asr-captions-windows-x64
 
       - name: Azure login
         uses: azure/login@v2
@@ -301,7 +301,7 @@ jobs:
         run: npm ci
 
       - name: Build binary
-        run: npx pkg native-host.js --target node20-linux-x64 --output dist/whooptido-asr-captions-linux-x64
+        run: npx pkg native-host.js --target node20-linux-x64 --no-bytecode --public --public-packages "*" --output dist/whooptido-asr-captions-linux-x64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

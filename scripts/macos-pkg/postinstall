@@ -7,7 +7,9 @@ set -euo pipefail
 
 HOST_NAME="com.whooptido.companion"
 BINARY_NAME="whooptido-asr-captions"
-EXTENSION_ID="iabpcgbkbkkeokigbgogggaoejnbkikn"
+# pjac... is the current packaged/unpacked Whooptido ID; iab... is retained for older beta installs.
+PRIMARY_EXTENSION_ID="pjacfbdlalhafifgdoddiojjjeabkhcg"
+LEGACY_EXTENSION_ID="iabpcgbkbkkeokigbgogggaoejnbkikn"
 STAGING_DIR="/usr/local/whooptido-staging"
 
 # --- Determine the real user (postinstall runs as root) ---
@@ -48,7 +50,8 @@ cat > "$NM_DIR/$HOST_NAME.json" << EOF
   "path": "$INSTALL_DIR/$BINARY_NAME",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://$EXTENSION_ID/"
+    "chrome-extension://$PRIMARY_EXTENSION_ID/",
+    "chrome-extension://$LEGACY_EXTENSION_ID/"
   ]
 }
 EOF

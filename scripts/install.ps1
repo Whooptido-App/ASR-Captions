@@ -15,8 +15,10 @@ $HostName = "com.whooptido.companion"
 $InstallDir = "$env:LOCALAPPDATA\Whooptido"
 $BinaryName = "whooptido-asr-captions.exe"
 $Asset = "whooptido-asr-captions-windows-x64.exe"
-# Extension ID — update if CWS ID changes
-$ExtensionId = "iabpcgbkbkkeokigbgogggaoejnbkikn"
+# Extension IDs allowed to connect to the native host.
+# pjac... is the current packaged/unpacked Whooptido ID; iab... is retained for older beta installs.
+$PrimaryExtensionId = "pjacfbdlalhafifgdoddiojjjeabkhcg"
+$LegacyExtensionId = "iabpcgbkbkkeokigbgogggaoejnbkikn"
 
 function Write-Step($msg) { Write-Host "  > $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "  ✓ $msg" -ForegroundColor Green }
@@ -54,7 +56,8 @@ $Manifest = @"
   "path": "$BinaryPathEscaped",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://$ExtensionId/"
+    "chrome-extension://$PrimaryExtensionId/",
+    "chrome-extension://$LegacyExtensionId/"
   ]
 }
 "@
