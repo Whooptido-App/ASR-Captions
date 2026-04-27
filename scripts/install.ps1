@@ -3,7 +3,7 @@
 #
 # What this does:
 # 1. Downloads the Windows x64 binary from GitHub Releases
-# 2. Downloads the whisper.cpp runtime used by the companion
+# 2. Downloads the Whooptido-built generic whisper.cpp runtime used by the companion
 # 3. Installs both to %LOCALAPPDATA%\Whooptido\
 # 4. Creates the native messaging host manifest
 # 5. Registers in the Windows Registry for Chrome
@@ -16,7 +16,8 @@ $HostName = "com.whooptido.companion"
 $InstallDir = "$env:LOCALAPPDATA\Whooptido"
 $BinaryName = "whooptido-asr-captions.exe"
 $Asset = "whooptido-asr-captions-windows-x64.exe"
-$WhisperRuntimeUrl = "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip"
+$WhisperRuntimeAsset = "whooptido-whisper-runtime-windows-x64.zip"
+$WhisperRuntimeUrl = "https://github.com/$Repo/releases/latest/download/$WhisperRuntimeAsset"
 # Extension IDs allowed to connect to the native host.
 # pjac... is the current packaged/unpacked Whooptido ID; iab... is retained for older beta installs.
 $PrimaryExtensionId = "pjacfbdlalhafifgdoddiojjjeabkhcg"
@@ -51,8 +52,8 @@ try {
 Write-Step "Downloading whisper.cpp runtime..."
 
 $RuntimeDir = Join-Path $InstallDir "whisper"
-$RuntimeZip = Join-Path $env:TEMP "whooptido-whisper-bin-x64.zip"
-$RuntimeExtract = Join-Path $env:TEMP "whooptido-whisper-bin-x64"
+$RuntimeZip = Join-Path $env:TEMP $WhisperRuntimeAsset
+$RuntimeExtract = Join-Path $env:TEMP "whooptido-whisper-runtime-windows-x64"
 
 try {
   if (Test-Path -LiteralPath $RuntimeExtract) {
@@ -61,12 +62,27 @@ try {
   New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
   Invoke-WebRequest -Uri $WhisperRuntimeUrl -OutFile $RuntimeZip -UseBasicParsing
   Expand-Archive -Path $RuntimeZip -DestinationPath $RuntimeExtract -Force
-  Copy-Item -Path (Join-Path $RuntimeExtract "Release\*") -Destination $RuntimeDir -Recurse -Force
+
+  $RuntimeSource = $RuntimeExtract
+  $UpstreamReleaseDir = Join-Path $RuntimeExtract "Release"
+  if (Test-Path -LiteralPath $UpstreamReleaseDir) {
+    $RuntimeSource = $UpstreamReleaseDir
+  }
+
+  Copy-Item -Path (Join-Path $RuntimeSource "*") -Destination $RuntimeDir -Recurse -Force
 
   $WhisperCliPath = Join-Path $RuntimeDir "whisper-cli.exe"
   if (-not (Test-Path -LiteralPath $WhisperCliPath)) {
     Write-Fail "whisper-cli.exe was not found after runtime installation."
   }
+
+  $ProbeOutput = & $WhisperCliPath -h 2>&1
+  $ProbeExit = $LASTEXITCODE
+  if ($ProbeExit -ne 0) {
+    $ProbeText = ($ProbeOutput | Out-String).Trim()
+    Write-Fail "whisper-cli.exe failed its startup check (exit $ProbeExit). $ProbeText"
+  }
+
   Write-Ok "Whisper runtime installed: $RuntimeDir"
 } catch {
   Write-Fail "Whisper runtime download failed: $($_.Exception.Message)"

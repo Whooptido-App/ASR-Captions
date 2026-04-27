@@ -8,6 +8,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  WHISPER_CPP_VERSION: v1.8.4
 
 jobs:
   build-macos:
@@ -245,28 +246,105 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      - name: Download whisper.cpp Windows runtime
+      - name: Build generic whisper.cpp Windows runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $zipPath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-bin-x64.zip'
-          $extractPath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-bin-x64'
           $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime'
+          $sourcePath = Join-Path $env:RUNNER_TEMP 'whisper.cpp'
+          $buildPath = Join-Path $env:RUNNER_TEMP 'whisper.cpp-build'
 
-          Invoke-WebRequest `
-            -Uri 'https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip' `
-            -OutFile $zipPath `
-            -UseBasicParsing
+          git clone --depth 1 --branch $env:WHISPER_CPP_VERSION https://github.com/ggml-org/whisper.cpp.git $sourcePath
 
-          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+          cmake `
+            -S $sourcePath `
+            -B $buildPath `
+            -A x64 `
+            -DWHISPER_BUILD_TESTS=OFF `
+            -DWHISPER_BUILD_EXAMPLES=ON `
+            -DWHISPER_BUILD_SERVER=OFF `
+            -DWHISPER_CURL=OFF `
+            -DWHISPER_SDL2=OFF `
+            -DWHISPER_OPENVINO=OFF `
+            -DGGML_NATIVE=OFF `
+            -DGGML_SSE42=OFF `
+            -DGGML_AVX=OFF `
+            -DGGML_AVX2=OFF `
+            -DGGML_BMI2=OFF `
+            -DGGML_FMA=OFF `
+            -DGGML_F16C=OFF `
+            -DGGML_AVX512=OFF `
+            -DGGML_BLAS=OFF `
+            -DGGML_OPENMP=OFF `
+            -DGGML_VULKAN=OFF `
+            -DGGML_CUDA=OFF `
+            -DGGML_CPU_ALL_VARIANTS=OFF
+
+          cmake --build $buildPath --config Release --target whisper-cli --parallel
+
+          $cli = Get-ChildItem -LiteralPath $buildPath -Recurse -Filter whisper-cli.exe | Select-Object -First 1
+          if (-not $cli) {
+            throw 'whisper-cli.exe was not produced by the generic whisper.cpp build'
+          }
+
           New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
-          Copy-Item -Path (Join-Path $extractPath 'Release\*') -Destination $runtimePath -Recurse -Force
+
+          $runtimeFiles = Get-ChildItem -LiteralPath $buildPath -Recurse -File | Where-Object {
+            $_.Name -eq 'whisper-cli.exe' -or $_.Extension -eq '.dll'
+          }
+          foreach ($file in $runtimeFiles) {
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $runtimePath $file.Name) -Force
+          }
 
           if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'whisper-cli.exe'))) {
-            throw 'whisper-cli.exe was not found in whisper.cpp runtime package'
+            throw 'whisper-cli.exe was not found in the generated runtime package'
+          }
+
+          $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Generated whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
           }
 
           Get-ChildItem -LiteralPath $runtimePath | Select-Object Name,Length | Format-Table -AutoSize
+
+      - name: Sign Windows whisper runtime
+        uses: azure/artifact-signing-action@v1
+        with:
+          endpoint: ${{ env.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_CODESIGN_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.AZURE_CODESIGN_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\dist\whisper-runtime
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Package Windows whisper runtime zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime'
+          $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Signed whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
+          }
+
+          $runtimeZip = Join-Path $env:GITHUB_WORKSPACE 'dist\whooptido-whisper-runtime-windows-x64.zip'
+          if (Test-Path -LiteralPath $runtimeZip) {
+            Remove-Item -LiteralPath $runtimeZip -Force
+          }
+          Compress-Archive -Path (Join-Path $runtimePath '*') -DestinationPath $runtimeZip -Force
+          Get-Item -LiteralPath $runtimeZip | Select-Object FullName,Length | Format-Table -AutoSize
 
       - name: Build Windows installer
         run: |
@@ -305,6 +383,14 @@ jobs:
             @{ Role = 'native-host'; Path = 'dist\whooptido-asr-captions-windows-x64.exe' },
             @{ Role = 'installer'; Path = 'Output\whooptido-asr-captions-windows-x64-setup.exe' }
           )
+
+          $runtimeFiles = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime') -File | Where-Object {
+            $_.Extension -in @('.exe', '.dll')
+          }
+          foreach ($runtimeFile in $runtimeFiles) {
+            $relative = [System.IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $runtimeFile.FullName)
+            $files += @{ Role = 'whisper-runtime'; Path = $relative }
+          }
 
           $report = foreach ($file in $files) {
             $path = Join-Path $env:GITHUB_WORKSPACE $file.Path
@@ -357,6 +443,12 @@ jobs:
         with:
           name: windows-signing-report
           path: Output/windows-signing-report.json
+
+      - name: Upload Windows whisper runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whooptido-whisper-runtime-windows-x64
+          path: dist/whooptido-whisper-runtime-windows-x64.zip
 
   build-linux:
     runs-on: ubuntu-latest
@@ -432,3 +524,5 @@ jobs:
             ### Windows signing and SmartScreen
 
             The Windows setup file is Authenticode-signed. New signed Windows installers can still show Microsoft Defender SmartScreen's "unrecognized app" prompt until the exact file hash builds reputation. Download only from this release, verify the publisher shown by Windows, and compare the SHA-256 in `windows-signing-report.json` if you need extra confirmation.
+
+            Windows builds include a Whooptido-built generic whisper.cpp runtime for broad x64 CPU compatibility. The standalone runtime zip is included for the PowerShell installer fallback.

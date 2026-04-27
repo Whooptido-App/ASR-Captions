@@ -1,6 +1,6 @@
 {
   "name": "whooptido-asr-captions",
-  "version": "1.0.0-beta.10",
+  "version": "1.0.0-beta.11",
   "description": "Whooptido ASR Companion App — local speech recognition for word-for-word captions",
   "main": "native-host.js",
   "scripts": {

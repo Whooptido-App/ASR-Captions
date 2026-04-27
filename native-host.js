@@ -23,7 +23,7 @@ const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo-q5_0.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
-const HOST_VERSION = '1.0.0-beta.10';
+const HOST_VERSION = '1.0.0-beta.11';
 const MODEL_QUALITY_RANK = Object.freeze({
   'small': 100,
   'medium': 200,
@@ -96,36 +96,242 @@ function getWhisperCliCandidates() {
   return [...new Set(candidates.filter(Boolean))];
 }
 
-function isExecutableCandidateAvailable(candidate) {
-  if (!candidate) return false;
-  if (candidate.includes(path.sep) || candidate.includes('/') || candidate.includes('\\')) {
-    return fs.existsSync(candidate);
+function isPathLike(candidate) {
+  return Boolean(candidate && (candidate.includes(path.sep) || candidate.includes('/') || candidate.includes('\\')));
+}
+
+function clampDiagnosticText(value, maxLength = 2000) {
+  if (!value) return '';
+  const text = String(value).trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function bufferToString(value) {
+  if (!value) return '';
+  return Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
+}
+
+function getWhisperExecutionOptions(whisperCliPath) {
+  const runtimeDir = isPathLike(whisperCliPath) ? path.dirname(whisperCliPath) : null;
+  const env = { ...process.env };
+
+  if (runtimeDir) {
+    const currentPath = env.PATH || env.Path || '';
+    const nextPath = [runtimeDir, currentPath].filter(Boolean).join(path.delimiter);
+    env.PATH = nextPath;
+    env.Path = nextPath;
   }
 
-  try {
-    execFileSync(candidate, ['--help'], { stdio: 'pipe', timeout: 5000 });
-    return true;
-  } catch (error) {
-    return false;
+  return {
+    cwd: runtimeDir && fs.existsSync(runtimeDir) ? runtimeDir : process.cwd(),
+    env,
+    windowsHide: true
+  };
+}
+
+function isWhisperHelpOutput(text) {
+  return /usage:|options:|whisper\.cpp|whisper-cli/i.test(text || '')
+    && /-m|--model|-h|--help/i.test(text || '');
+}
+
+function probeWhisperCli(whisperCliPath) {
+  const attempts = [];
+
+  for (const args of [['-h'], ['--help']]) {
+    try {
+      const stdout = execFileSync(whisperCliPath, args, {
+        ...getWhisperExecutionOptions(whisperCliPath),
+        stdio: 'pipe',
+        encoding: 'utf8',
+        timeout: 5000
+      });
+      const attempt = {
+        args,
+        ok: true,
+        exitCode: 0,
+        signal: null,
+        stdout: clampDiagnosticText(stdout),
+        stderr: '',
+        message: null
+      };
+      attempts.push(attempt);
+      return { ok: true, args, exitCode: 0, signal: null, stdout: attempt.stdout, stderr: '', attempts };
+    } catch (error) {
+      const stdout = bufferToString(error.stdout);
+      const stderr = bufferToString(error.stderr);
+      const combinedOutput = `${stdout}\n${stderr}`;
+      const attempt = {
+        args,
+        ok: false,
+        exitCode: Number.isInteger(error.status) ? error.status : null,
+        signal: error.signal || null,
+        stdout: clampDiagnosticText(stdout),
+        stderr: clampDiagnosticText(stderr),
+        message: clampDiagnosticText(error.message, 1000)
+      };
+
+      if (isWhisperHelpOutput(combinedOutput)) {
+        attempt.ok = true;
+        attempt.message = attempt.message || 'Whisper help output returned with a non-zero exit code';
+        attempts.push(attempt);
+        return {
+          ok: true,
+          args,
+          exitCode: attempt.exitCode,
+          signal: attempt.signal,
+          stdout: attempt.stdout,
+          stderr: attempt.stderr,
+          attempts
+        };
+      }
+
+      attempts.push(attempt);
+    }
   }
+
+  const lastAttempt = attempts[attempts.length - 1] || {};
+  return {
+    ok: false,
+    args: lastAttempt.args || null,
+    exitCode: lastAttempt.exitCode ?? null,
+    signal: lastAttempt.signal || null,
+    stdout: lastAttempt.stdout || '',
+    stderr: lastAttempt.stderr || '',
+    message: lastAttempt.message || 'Whisper probe failed',
+    attempts
+  };
 }
 
 function resolveWhisperCli() {
   const candidates = getWhisperCliCandidates();
+  let fallback = null;
+
   for (const candidate of candidates) {
-    if (isExecutableCandidateAvailable(candidate)) {
-      return { path: candidate, candidates };
+    if (isPathLike(candidate) && !fs.existsSync(candidate)) {
+      continue;
+    }
+
+    const probe = probeWhisperCli(candidate);
+    if (probe.ok) {
+      return { path: candidate, candidates, probe };
+    }
+
+    if (!fallback && isPathLike(candidate) && fs.existsSync(candidate)) {
+      fallback = { path: candidate, candidates, probe };
     }
   }
-  return { path: null, candidates };
+
+  return fallback || { path: null, candidates, probe: null };
+}
+
+function getWindowsLocalAppDataModelsDir() {
+  if (os.platform() !== 'win32') return null;
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  return path.join(localAppData, 'Whooptido', 'models');
+}
+
+function normalizePathKey(filePath) {
+  const resolved = path.resolve(filePath);
+  return os.platform() === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function uniquePaths(paths) {
+  const seen = new Set();
+  const result = [];
+  for (const candidate of paths.filter(Boolean)) {
+    const key = normalizePathKey(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(candidate);
+  }
+  return result;
+}
+
+function getModelSearchDirs() {
+  return uniquePaths([
+    MODELS_DIR,
+    OLD_MODELS_DIR,
+    getWindowsLocalAppDataModelsDir(),
+    path.join(getExecutableDir(), 'models')
+  ]);
+}
+
+function getModelDirPriority(dir) {
+  const key = normalizePathKey(dir);
+  if (key === normalizePathKey(MODELS_DIR)) return 400;
+  const windowsModelsDir = getWindowsLocalAppDataModelsDir();
+  if (windowsModelsDir && key === normalizePathKey(windowsModelsDir)) return 300;
+  if (key === normalizePathKey(OLD_MODELS_DIR)) return 200;
+  if (key === normalizePathKey(path.join(getExecutableDir(), 'models'))) return 100;
+  return 0;
+}
+
+function getModelSource(dir) {
+  const key = normalizePathKey(dir);
+  if (key === normalizePathKey(MODELS_DIR)) return 'canonical';
+  const windowsModelsDir = getWindowsLocalAppDataModelsDir();
+  if (windowsModelsDir && key === normalizePathKey(windowsModelsDir)) return 'windows-localappdata';
+  if (key === normalizePathKey(OLD_MODELS_DIR)) return 'legacy';
+  if (key === normalizePathKey(path.join(getExecutableDir(), 'models'))) return 'install-dir';
+  return 'other';
+}
+
+function getModelIdFromFilename(filename) {
+  return MODEL_FILENAME_TO_ID[filename] || filename.replace(/^ggml-/, '').replace(/\.bin$/, '');
+}
+
+function buildModelDescriptor(dir, filename) {
+  const modelPath = path.join(dir, filename);
+  const stats = fs.statSync(modelPath);
+  if (!stats.isFile()) return null;
+
+  const id = getModelIdFromFilename(filename);
+  return {
+    id,
+    name: id,
+    fileName: filename,
+    path: modelPath,
+    size: stats.size,
+    qualityRank: getModelRank(id),
+    source: getModelSource(dir),
+    modelsDir: dir,
+    dirPriority: getModelDirPriority(dir)
+  };
+}
+
+function sortModels(models) {
+  return models.sort((a, b) =>
+    (b.qualityRank || 0) - (a.qualityRank || 0)
+    || (b.dirPriority || 0) - (a.dirPriority || 0)
+    || (b.size || 0) - (a.size || 0)
+  );
+}
+
+function stripInternalModelFields(model) {
+  const { dirPriority, ...publicModel } = model;
+  return publicModel;
+}
+
+function findInstalledModelById(modelId) {
+  if (!modelId) return null;
+  const normalizedModelId = String(modelId).trim();
+  return listInstalledModels().find((model) => model.id === normalizedModelId) || null;
+}
+
+function getModelCandidateNames(modelId) {
+  return new Set([
+    ...(MODEL_ID_TO_FILENAMES[modelId] || []),
+    `ggml-${modelId}.bin`
+  ]);
 }
 
 function resolveModelPath(model, modelId) {
   if (model) return model;
-  if (modelId) {
-    const possiblePath = path.join(MODELS_DIR, `ggml-${modelId}.bin`);
-    if (fs.existsSync(possiblePath)) return possiblePath;
-  }
+
+  const installedModel = findInstalledModelById(modelId);
+  if (installedModel?.path) return installedModel.path;
+
   return DEFAULT_MODEL;
 }
 
@@ -170,27 +376,30 @@ function getDownloadFilename(modelId, url) {
 
 function listInstalledModels() {
   try {
-    if (!fs.existsSync(MODELS_DIR)) {
-      return [];
+    const discovered = [];
+
+    for (const dir of getModelSearchDirs()) {
+      if (!fs.existsSync(dir)) continue;
+
+      const files = fs.readdirSync(dir).filter((filename) => filename.endsWith('.bin'));
+      for (const filename of files) {
+        try {
+          const model = buildModelDescriptor(dir, filename);
+          if (model) discovered.push(model);
+        } catch (error) {
+          log('Error reading model file ' + path.join(dir, filename) + ': ' + error.message);
+        }
+      }
     }
 
-    return fs.readdirSync(MODELS_DIR)
-      .filter((filename) => filename.endsWith('.bin'))
-      .map((filename) => {
-        const modelPath = path.join(MODELS_DIR, filename);
-        const stats = fs.statSync(modelPath);
-        const id = MODEL_FILENAME_TO_ID[filename] || filename.replace(/^ggml-/, '').replace(/\.bin$/, '');
+    const deduped = new Map();
+    for (const model of sortModels(discovered)) {
+      if (!deduped.has(model.id)) {
+        deduped.set(model.id, stripInternalModelFields(model));
+      }
+    }
 
-        return {
-          id,
-          name: id,
-          fileName: filename,
-          path: modelPath,
-          size: stats.size,
-          qualityRank: getModelRank(id)
-        };
-      })
-      .sort((a, b) => (b.qualityRank || 0) - (a.qualityRank || 0) || (b.size || 0) - (a.size || 0));
+    return Array.from(deduped.values());
   } catch (error) {
     log('Error listing installed models: ' + error.message);
     return [];
@@ -320,7 +529,7 @@ function transcribeFileWithWhisper({
     log(`Whisper args: ${args.join(' ')}`);
 
     const startTime = Date.now();
-    const whisper = spawn(whisperInfo.path, args);
+    const whisper = spawn(whisperInfo.path, args, getWhisperExecutionOptions(whisperInfo.path));
     registerWhisperProcess(operationKey, whisper);
     let stderr = '';
 
@@ -930,14 +1139,20 @@ function handleStatus(push) {
   let whisperInstalled = false;
   let whisperError = null;
   const whisperInfo = resolveWhisperCli();
+  const whisperProbe = whisperInfo.probe || null;
 
-  if (whisperInfo.path) {
-    try {
-      execFileSync(whisperInfo.path, ['--help'], { stdio: 'pipe', timeout: 5000 });
-      whisperInstalled = true;
-    } catch (e) {
-      whisperError = e.message;
-    }
+  if (whisperProbe?.ok) {
+    whisperInstalled = true;
+  } else if (whisperInfo.path) {
+    const probeDetail = whisperProbe
+      ? [
+          whisperProbe.message,
+          whisperProbe.exitCode !== null ? `exit=${whisperProbe.exitCode}` : null,
+          whisperProbe.signal ? `signal=${whisperProbe.signal}` : null,
+          whisperProbe.stderr || whisperProbe.stdout || null
+        ].filter(Boolean).join(' | ')
+      : 'no probe detail';
+    whisperError = `Whisper runtime failed health check at ${whisperInfo.path}: ${probeDetail}`;
   } else {
     whisperError = `Whisper runtime not found. Checked: ${whisperInfo.candidates.join(', ')}`;
   }
@@ -962,9 +1177,11 @@ function handleStatus(push) {
     modelInstalled: models.length > 0,
     modelPath: activeModel?.path || DEFAULT_MODEL,
     modelsDir: MODELS_DIR,
+    modelSearchDirs: getModelSearchDirs(),
     models,
     activeModelId: activeModel?.id || null,
     whisperPath: whisperInfo.path || null,
+    whisperProbe,
     gpuBackend,
     errors: whisperError ? [whisperError] : []
   });
@@ -989,7 +1206,8 @@ function detectGpuBackend(whisperCliPath) {
     if (platform === 'darwin') {
       // Check if Metal is available by running whisper-cli with GPU flag
       try {
-        const output = execFileSync(whisperCliPath, ['--help'], { encoding: 'utf-8', timeout: 5000 });
+        const probe = probeWhisperCli(whisperCliPath);
+        const output = `${probe.stdout || ''}\n${probe.stderr || ''}`;
         // If whisper.cpp was built with Metal support, it will show in help
         if (output.includes('gpu') || output.includes('metal') || output.includes('-ng')) {
           // Check if we're on Apple Silicon
@@ -1044,10 +1262,10 @@ function detectGpuBackend(whisperCliPath) {
 function handleListModels(push) {
   try {
     const models = listInstalledModels();
-    push({ type: 'models', models });
+    push({ type: 'models', models, modelSearchDirs: getModelSearchDirs() });
     log(`Listed ${models.length} models`);
   } catch (e) {
-    push({ type: 'models', models: [], error: e.message });
+    push({ type: 'models', models: [], modelSearchDirs: getModelSearchDirs(), error: e.message });
     log('Error listing models: ' + e.message);
   }
 }
@@ -1061,33 +1279,28 @@ function handleDeleteModel(msg, push) {
   }
 
   try {
-    if (!fs.existsSync(MODELS_DIR)) {
-      push({ type: 'delete_model_ack', success: true, deleted: [] });
-      return;
-    }
-
-    const candidateNames = new Set([
-      ...(MODEL_ID_TO_FILENAMES[modelId] || []),
-      `ggml-${modelId}.bin`
-    ]);
+    const candidateNames = getModelCandidateNames(modelId);
 
     const deleted = [];
-    const presentFiles = fs.readdirSync(MODELS_DIR);
+    for (const dir of getModelSearchDirs()) {
+      if (!fs.existsSync(dir)) continue;
 
-    for (const fileName of presentFiles) {
-      const derivedId = MODEL_FILENAME_TO_ID[fileName] || fileName.replace(/^ggml-/, '').replace(/\.bin$/, '');
-      if (!candidateNames.has(fileName) && derivedId !== modelId) {
-        continue;
+      const presentFiles = fs.readdirSync(dir);
+      for (const fileName of presentFiles) {
+        const derivedId = getModelIdFromFilename(fileName);
+        if (!candidateNames.has(fileName) && derivedId !== modelId) {
+          continue;
+        }
+
+        const filePath = path.join(dir, fileName);
+        if (!fs.existsSync(filePath)) {
+          continue;
+        }
+
+        fs.unlinkSync(filePath);
+        deleted.push(filePath);
+        log('Deleted model file: ' + filePath);
       }
-
-      const filePath = path.join(MODELS_DIR, fileName);
-      if (!fs.existsSync(filePath)) {
-        continue;
-      }
-
-      fs.unlinkSync(filePath);
-      deleted.push(filePath);
-      log('Deleted model file: ' + filePath);
     }
 
     push({
@@ -1173,7 +1386,7 @@ function downloadFile(url, destinationPath, expectedSize, redirectCount = 0) {
       });
     });
 
-    request.setTimeout(600000, () => {
+    request.setTimeout(3600000, () => {
       request.destroy(new Error('Model download timeout'));
     });
 
@@ -1192,6 +1405,20 @@ function handleDownloadModel(msg, push, done) {
   const modelPath = path.join(MODELS_DIR, filename);
   
   log(`Download requested: ${modelId} from ${url}`);
+
+  const existingModel = findInstalledModelById(modelId);
+  if (existingModel && (!expectedSize || Math.abs(existingModel.size - expectedSize) < 1000)) {
+    push({
+      type: 'download_complete',
+      success: true,
+      modelId,
+      path: existingModel.path,
+      size: existingModel.size,
+      message: 'Model already installed'
+    });
+    done();
+    return;
+  }
   
   // Ensure models directory exists
   if (!fs.existsSync(MODELS_DIR)) {

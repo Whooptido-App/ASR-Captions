@@ -33,6 +33,8 @@ irm https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/in
 
 The Windows installer is Authenticode-signed. During early beta releases, Microsoft Defender SmartScreen may still show an "unrecognized app" prompt for a new installer hash while reputation builds. Download only from the official GitHub release, verify the publisher shown by Windows, and compare the SHA-256 in the release's `windows-signing-report.json` if you need extra confirmation.
 
+Windows releases include a Whooptido-built generic whisper.cpp runtime for broad x64 CPU compatibility.
+
 ### After Installing
 
 1. **Restart Chrome** (close all Chrome windows and reopen)
