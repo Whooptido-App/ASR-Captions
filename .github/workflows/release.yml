@@ -281,10 +281,7 @@ jobs:
             throw 'cublas64_12.dll was not found in the CUDA runtime package'
           }
 
-          $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            throw "CUDA whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
-          }
+          Write-Host 'Skipping CUDA whisper-cli launch probe on GitHub runners because ggml-cuda.dll imports nvcuda.dll from the NVIDIA driver.'
 
           Get-ChildItem -LiteralPath $runtimePath | Select-Object Name,Length | Format-Table -AutoSize
 
@@ -403,15 +400,19 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $packages = @(
-            @{ Backend = 'cuda'; RuntimePath = 'dist\whisper-runtime-cuda'; ZipPath = 'dist\whooptido-whisper-runtime-windows-x64-cuda.zip'; ExpectedDll = 'ggml-cuda.dll' },
-            @{ Backend = 'vulkan'; RuntimePath = 'dist\whisper-runtime-vulkan'; ZipPath = 'dist\whooptido-whisper-runtime-windows-x64-vulkan.zip'; ExpectedDll = 'ggml-vulkan.dll' }
+            @{ Backend = 'cuda'; RuntimePath = 'dist\whisper-runtime-cuda'; ZipPath = 'dist\whooptido-whisper-runtime-windows-x64-cuda.zip'; ExpectedDll = 'ggml-cuda.dll'; ProbeOnCi = $false },
+            @{ Backend = 'vulkan'; RuntimePath = 'dist\whisper-runtime-vulkan'; ZipPath = 'dist\whooptido-whisper-runtime-windows-x64-vulkan.zip'; ExpectedDll = 'ggml-vulkan.dll'; ProbeOnCi = $true }
           )
 
           foreach ($package in $packages) {
             $runtimePath = Join-Path $env:GITHUB_WORKSPACE $package.RuntimePath
-            $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
-            if ($LASTEXITCODE -ne 0) {
-              throw "Signed $($package.Backend) whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
+            if ($package.ProbeOnCi) {
+              $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                throw "Signed $($package.Backend) whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
+              }
+            } else {
+              Write-Host "Skipping $($package.Backend) whisper-cli launch probe on GitHub runner."
             }
             if (-not (Test-Path -LiteralPath (Join-Path $runtimePath $package.ExpectedDll))) {
               throw "$($package.ExpectedDll) is missing from the $($package.Backend) runtime package"
