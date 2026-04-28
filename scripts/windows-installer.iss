@@ -40,7 +40,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "..\dist\whooptido-asr-captions-windows-x64.exe"; DestDir: "{app}"; DestName: "whooptido-asr-captions.exe"; Flags: ignoreversion
-Source: "..\dist\whisper-runtime\*"; DestDir: "{app}\whisper"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\whisper-runtime-cuda\*"; DestDir: "{app}\whisper-cuda"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\whisper-runtime-vulkan\*"; DestDir: "{app}\whisper-vulkan"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
 ; Register the native messaging host with Chrome
@@ -48,10 +49,13 @@ Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.whooptido.c
 
 [UninstallDelete]
 Type: files; Name: "{app}\com.whooptido.companion.json"
+Type: filesandordirs; Name: "{app}\whisper"
+Type: filesandordirs; Name: "{app}\whisper-cuda"
+Type: filesandordirs; Name: "{app}\whisper-vulkan"
 
 [Messages]
 WelcomeLabel1=Whooptido ASR Captions
-WelcomeLabel2=This will install the Whooptido ASR Captions companion app on your computer.%n%nThis companion app enables word-for-word speech recognition captions in the Whooptido browser extension.%n%nAfter installation, restart Chrome and enable Word-for-Word Captions in the Whooptido extension settings.
+WelcomeLabel2=This will install the Whooptido ASR Captions companion app on your computer.%n%nThis companion app enables word-for-word speech recognition captions in the Whooptido browser extension using accelerated NVIDIA CUDA or AMD Vulkan runtimes. CPU-only ASR is not supported.%n%nAfter installation, restart Chrome and enable Word-for-Word Captions in the Whooptido extension settings.
 
 [Code]
 // Create the native messaging manifest JSON after install

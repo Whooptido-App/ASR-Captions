@@ -1,9 +1,9 @@
 #!/bin/bash
-# Whooptido ASR Captions — Installer for macOS and Linux
+# Whooptido ASR Captions — Installer for Apple Silicon macOS
 # Usage: curl -fsSL https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/install.sh | bash
 #
 # What this does:
-# 1. Detects your platform (macOS ARM/Intel, Linux x64)
+# 1. Detects supported accelerated platforms (Apple Silicon macOS)
 # 2. Downloads the correct binary from GitHub Releases
 # 3. Installs it to ~/.whooptido/
 # 4. Registers the Chrome native messaging host
@@ -44,15 +44,12 @@ detect_platform() {
     Darwin)
       case "$arch" in
         arm64) asset="whooptido-asr-captions-macos-arm" ;;
-        x86_64) asset="whooptido-asr-captions-macos-intel" ;;
-        *) fail "Unsupported macOS architecture: $arch" ;;
+        x86_64) fail "Unsupported ASR platform: Intel Mac would use CPU-only processing. Whooptido ASR requires Apple Silicon Metal." ;;
+        *) fail "Unsupported macOS architecture: $arch. Whooptido ASR requires Apple Silicon Metal." ;;
       esac
       ;;
     Linux)
-      case "$arch" in
-        x86_64) asset="whooptido-asr-captions-linux-x64" ;;
-        *) fail "Unsupported Linux architecture: $arch (only x86_64 supported)" ;;
-      esac
+      fail "Unsupported ASR platform: the Linux installer does not yet package NVIDIA CUDA or AMD Vulkan runtimes, and CPU-only processing is not supported."
       ;;
     *)
       fail "Unsupported OS: $os (use install.ps1 for Windows)"
@@ -68,9 +65,6 @@ get_nm_dir() {
   case "$os" in
     Darwin)
       echo "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
-      ;;
-    Linux)
-      echo "$HOME/.config/google-chrome/NativeMessagingHosts"
       ;;
   esac
 }

@@ -9,13 +9,18 @@ The ASR Captions companion app runs a local speech recognition engine ([Whisper]
 ## Requirements
 
 - The [Whooptido Chrome Extension](https://whooptido.app)
-- 4 GB+ RAM (8 GB+ recommended for larger models)
+- One supported local acceleration backend:
+	- NVIDIA GPU on Windows using CUDA
+	- AMD GPU on Windows using Vulkan
+	- Apple Silicon Mac using Metal
+
+CPU-only speech recognition is not supported for Word-for-Word Captions.
 
 ## Installation
 
 The installer downloads the binary and registers the Chrome native messaging host automatically.
 
-### macOS / Linux
+### macOS (Apple Silicon)
 
 Open **Terminal** and run:
 
@@ -33,7 +38,7 @@ irm https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/in
 
 The Windows installer is Authenticode-signed. During early beta releases, Microsoft Defender SmartScreen may still show an "unrecognized app" prompt for a new installer hash while reputation builds. Download only from the official GitHub release, verify the publisher shown by Windows, and compare the SHA-256 in the release's `windows-signing-report.json` if you need extra confirmation.
 
-Windows releases include a Whooptido-built generic whisper.cpp runtime for broad x64 CPU compatibility.
+Windows releases include accelerated whisper.cpp runtimes for NVIDIA CUDA and AMD Vulkan. The installer selects a runtime from detected hardware and refuses CPU-only installs.
 
 ### After Installing
 
@@ -44,7 +49,7 @@ Windows releases include a Whooptido-built generic whisper.cpp runtime for broad
 
 ## Uninstallation
 
-### macOS / Linux
+### macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/uninstall.sh | bash

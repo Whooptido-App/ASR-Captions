@@ -19,9 +19,6 @@ jobs:
           - target: node20-macos-arm64
             artifact: whooptido-asr-captions-macos-arm
             arch: arm64
-          - target: node20-macos-x64
-            artifact: whooptido-asr-captions-macos-intel
-            arch: x86_64
 
     runs-on: macos-latest
 
@@ -246,15 +243,66 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      - name: Build generic whisper.cpp Windows runtime
+      - name: Prepare whisper.cpp source
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime'
           $sourcePath = Join-Path $env:RUNNER_TEMP 'whisper.cpp'
-          $buildPath = Join-Path $env:RUNNER_TEMP 'whisper.cpp-build'
-
           git clone --depth 1 --branch $env:WHISPER_CPP_VERSION https://github.com/ggml-org/whisper.cpp.git $sourcePath
+          "WHISPER_CPP_SOURCE=$sourcePath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download NVIDIA CUDA whisper.cpp Windows runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime-cuda'
+          $runtimeZip = Join-Path $env:RUNNER_TEMP 'whisper-cublas-11.8.0-bin-x64.zip'
+          $extractPath = Join-Path $env:RUNNER_TEMP 'whisper-cublas-11.8.0-bin-x64'
+          $runtimeUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/$env:WHISPER_CPP_VERSION/whisper-cublas-11.8.0-bin-x64.zip"
+
+          Invoke-WebRequest -Uri $runtimeUrl -OutFile $runtimeZip -UseBasicParsing
+          Expand-Archive -Path $runtimeZip -DestinationPath $extractPath -Force
+
+          $runtimeSource = Join-Path $extractPath 'Release'
+          if (-not (Test-Path -LiteralPath $runtimeSource)) {
+            $runtimeSource = $extractPath
+          }
+
+          New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
+          Copy-Item -Path (Join-Path $runtimeSource '*') -Destination $runtimePath -Recurse -Force
+
+          if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'whisper-cli.exe'))) {
+            throw 'whisper-cli.exe was not found in the CUDA runtime package'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'ggml-cuda.dll'))) {
+            throw 'ggml-cuda.dll was not found in the CUDA runtime package'
+          }
+
+          $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            throw "CUDA whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
+          }
+
+          Get-ChildItem -LiteralPath $runtimePath | Select-Object Name,Length | Format-Table -AutoSize
+
+      - name: Install Vulkan SDK
+        run: choco install vulkan-sdk -y --no-progress
+
+      - name: Build AMD Vulkan whisper.cpp Windows runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime-vulkan'
+          $sourcePath = $env:WHISPER_CPP_SOURCE
+          $buildPath = Join-Path $env:RUNNER_TEMP 'whisper.cpp-vulkan-build'
+          $vulkanRoot = Join-Path $env:SystemDrive 'VulkanSDK'
+          $vulkanSdk = Get-ChildItem -LiteralPath $vulkanRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $vulkanSdk) {
+            throw 'Vulkan SDK installation was not found'
+          }
+
+          $env:VULKAN_SDK = $vulkanSdk.FullName
+          $env:Path = "$(Join-Path $vulkanSdk.FullName 'Bin');$env:Path"
 
           cmake `
             -S $sourcePath `
@@ -267,16 +315,9 @@ jobs:
             -DWHISPER_SDL2=OFF `
             -DWHISPER_OPENVINO=OFF `
             -DGGML_NATIVE=OFF `
-            -DGGML_SSE42=OFF `
-            -DGGML_AVX=OFF `
-            -DGGML_AVX2=OFF `
-            -DGGML_BMI2=OFF `
-            -DGGML_FMA=OFF `
-            -DGGML_F16C=OFF `
-            -DGGML_AVX512=OFF `
             -DGGML_BLAS=OFF `
             -DGGML_OPENMP=OFF `
-            -DGGML_VULKAN=OFF `
+            -DGGML_VULKAN=ON `
             -DGGML_CUDA=OFF `
             -DGGML_CPU_ALL_VARIANTS=OFF
 
@@ -284,7 +325,7 @@ jobs:
 
           $cli = Get-ChildItem -LiteralPath $buildPath -Recurse -Filter whisper-cli.exe | Select-Object -First 1
           if (-not $cli) {
-            throw 'whisper-cli.exe was not produced by the generic whisper.cpp build'
+            throw 'whisper-cli.exe was not produced by the Vulkan whisper.cpp build'
           }
 
           New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
@@ -299,6 +340,9 @@ jobs:
           if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'whisper-cli.exe'))) {
             throw 'whisper-cli.exe was not found in the generated runtime package'
           }
+          if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'ggml-vulkan.dll'))) {
+            throw 'ggml-vulkan.dll was not found in the generated runtime package'
+          }
 
           $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
           if ($LASTEXITCODE -ne 0) {
@@ -307,13 +351,13 @@ jobs:
 
           Get-ChildItem -LiteralPath $runtimePath | Select-Object Name,Length | Format-Table -AutoSize
 
-      - name: Sign Windows whisper runtime
+      - name: Sign Windows CUDA whisper runtime
         uses: azure/artifact-signing-action@v1
         with:
           endpoint: ${{ env.AZURE_CODESIGN_ENDPOINT }}
           signing-account-name: ${{ env.AZURE_CODESIGN_ACCOUNT_NAME }}
           certificate-profile-name: ${{ env.AZURE_CODESIGN_PROFILE_NAME }}
-          files-folder: ${{ github.workspace }}\dist\whisper-runtime
+          files-folder: ${{ github.workspace }}\dist\whisper-runtime-cuda
           files-folder-filter: exe,dll
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -329,22 +373,54 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
 
-      - name: Package Windows whisper runtime zip
+      - name: Sign Windows Vulkan whisper runtime
+        uses: azure/artifact-signing-action@v1
+        with:
+          endpoint: ${{ env.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_CODESIGN_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.AZURE_CODESIGN_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\dist\whisper-runtime-vulkan
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Package Windows whisper runtime zips
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime'
-          $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            throw "Signed whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
-          }
+          $packages = @(
+            @{ Backend = 'cuda'; RuntimePath = 'dist\whisper-runtime-cuda'; ZipPath = 'dist\whooptido-whisper-runtime-windows-x64-cuda.zip'; ExpectedDll = 'ggml-cuda.dll' },
+            @{ Backend = 'vulkan'; RuntimePath = 'dist\whisper-runtime-vulkan'; ZipPath = 'dist\whooptido-whisper-runtime-windows-x64-vulkan.zip'; ExpectedDll = 'ggml-vulkan.dll' }
+          )
 
-          $runtimeZip = Join-Path $env:GITHUB_WORKSPACE 'dist\whooptido-whisper-runtime-windows-x64.zip'
-          if (Test-Path -LiteralPath $runtimeZip) {
-            Remove-Item -LiteralPath $runtimeZip -Force
+          foreach ($package in $packages) {
+            $runtimePath = Join-Path $env:GITHUB_WORKSPACE $package.RuntimePath
+            $probeOutput = & (Join-Path $runtimePath 'whisper-cli.exe') -h 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              throw "Signed $($package.Backend) whisper-cli.exe failed health check with exit $LASTEXITCODE. Output: $($probeOutput | Out-String)"
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $runtimePath $package.ExpectedDll))) {
+              throw "$($package.ExpectedDll) is missing from the $($package.Backend) runtime package"
+            }
+
+            $runtimeZip = Join-Path $env:GITHUB_WORKSPACE $package.ZipPath
+            if (Test-Path -LiteralPath $runtimeZip) {
+              Remove-Item -LiteralPath $runtimeZip -Force
+            }
+            Compress-Archive -Path (Join-Path $runtimePath '*') -DestinationPath $runtimeZip -Force
+            Get-Item -LiteralPath $runtimeZip | Select-Object FullName,Length | Format-Table -AutoSize
           }
-          Compress-Archive -Path (Join-Path $runtimePath '*') -DestinationPath $runtimeZip -Force
-          Get-Item -LiteralPath $runtimeZip | Select-Object FullName,Length | Format-Table -AutoSize
 
       - name: Build Windows installer
         run: |
@@ -384,12 +460,19 @@ jobs:
             @{ Role = 'installer'; Path = 'Output\whooptido-asr-captions-windows-x64-setup.exe' }
           )
 
-          $runtimeFiles = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime') -File | Where-Object {
-            $_.Extension -in @('.exe', '.dll')
-          }
-          foreach ($runtimeFile in $runtimeFiles) {
-            $relative = [System.IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $runtimeFile.FullName)
-            $files += @{ Role = 'whisper-runtime'; Path = $relative }
+          $runtimeDirs = @(
+            @{ Role = 'whisper-runtime-cuda'; Path = 'dist\whisper-runtime-cuda' },
+            @{ Role = 'whisper-runtime-vulkan'; Path = 'dist\whisper-runtime-vulkan' }
+          )
+          foreach ($runtimeDir in $runtimeDirs) {
+            $absoluteRuntimeDir = Join-Path $env:GITHUB_WORKSPACE $runtimeDir.Path
+            $runtimeFiles = Get-ChildItem -LiteralPath $absoluteRuntimeDir -File | Where-Object {
+              $_.Extension -in @('.exe', '.dll')
+            }
+            foreach ($runtimeFile in $runtimeFiles) {
+              $relative = [System.IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $runtimeFile.FullName)
+              $files += @{ Role = $runtimeDir.Role; Path = $relative }
+            }
           }
 
           $report = foreach ($file in $files) {
@@ -444,37 +527,20 @@ jobs:
           name: windows-signing-report
           path: Output/windows-signing-report.json
 
-      - name: Upload Windows whisper runtime artifact
+      - name: Upload Windows CUDA whisper runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: whooptido-whisper-runtime-windows-x64
-          path: dist/whooptido-whisper-runtime-windows-x64.zip
+          name: whooptido-whisper-runtime-windows-x64-cuda
+          path: dist/whooptido-whisper-runtime-windows-x64-cuda.zip
 
-  build-linux:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build binary
-        run: npx pkg native-host.js --target node20-linux-x64 --no-bytecode --public --public-packages "*" --output dist/whooptido-asr-captions-linux-x64
-
-      - name: Upload artifact
+      - name: Upload Windows Vulkan whisper runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: whooptido-asr-captions-linux-x64
-          path: dist/whooptido-asr-captions-linux-x64
+          name: whooptido-whisper-runtime-windows-x64-vulkan
+          path: dist/whooptido-whisper-runtime-windows-x64-vulkan.zip
 
   release:
-    needs: [build-macos, build-windows, build-linux]
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -495,7 +561,7 @@ jobs:
           find artifacts -type f | while read f; do
             cp "$f" release-assets/
           done
-          # Include installer scripts (fallback for Linux & advanced users)
+          # Include installer scripts for direct install and uninstall flows
           cp scripts/install.sh release-assets/
           cp scripts/install.ps1 release-assets/
           cp scripts/uninstall.sh release-assets/
@@ -515,14 +581,14 @@ jobs:
             ## Installation
 
             **macOS (Apple Silicon):** Download `whooptido-asr-captions-macos-arm.pkg` and double-click to install.
-            **macOS (Intel):** Download `whooptido-asr-captions-macos-intel.pkg` and double-click to install.
-            **Windows:** Download `whooptido-asr-captions-windows-x64-setup.exe` and run the installer.
-            **Linux:** Run: `curl -fsSL https://raw.githubusercontent.com/Whooptido-App/ASR-Captions/main/scripts/install.sh | bash`
+            **Windows with NVIDIA or AMD GPU:** Download `whooptido-asr-captions-windows-x64-setup.exe` and run the installer, or run the PowerShell installer to download only the detected accelerated runtime.
 
             After installing, restart Chrome and enable Word-for-Word Captions in the Whooptido extension settings.
+
+            Word-for-Word captions require accelerated local speech recognition: NVIDIA CUDA, AMD Vulkan, or Apple Silicon Metal. CPU-only processing is not supported.
 
             ### Windows signing and SmartScreen
 
             The Windows setup file is Authenticode-signed. New signed Windows installers can still show Microsoft Defender SmartScreen's "unrecognized app" prompt until the exact file hash builds reputation. Download only from this release, verify the publisher shown by Windows, and compare the SHA-256 in `windows-signing-report.json` if you need extra confirmation.
 
-            Windows builds include a Whooptido-built generic whisper.cpp runtime for broad x64 CPU compatibility. The standalone runtime zip is included for the PowerShell installer fallback.
+            Windows builds include accelerated whisper.cpp runtime zips for NVIDIA CUDA and AMD Vulkan. The PowerShell installer selects one of these runtimes from detected hardware and refuses CPU-only installs.

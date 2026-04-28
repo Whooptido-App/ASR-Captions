@@ -10,7 +10,7 @@
  */
 
 const nativeMessage = require('chrome-native-messaging');
-const { spawn, execSync, execFileSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -23,7 +23,8 @@ const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo-q5_0.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
-const HOST_VERSION = '1.0.0-beta.12';
+const HOST_VERSION = '1.0.0-beta.13';
+const SUPPORTED_RUNTIME_BACKENDS = new Set(['cuda', 'vulkan', 'metal']);
 const MODEL_QUALITY_RANK = Object.freeze({
   'small': 100,
   'medium': 200,
@@ -83,6 +84,8 @@ function getWhisperCliCandidates() {
 
   candidates.push(
     path.join(installDir, 'whisper', executableName),
+    path.join(installDir, 'whisper-cuda', executableName),
+    path.join(installDir, 'whisper-vulkan', executableName),
     path.join(installDir, executableName)
   );
 
@@ -203,8 +206,192 @@ function probeWhisperCli(whisperCliPath) {
   };
 }
 
+function safeExecFile(command, args = [], timeout = 3000) {
+  try {
+    return execFileSync(command, args, {
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout,
+      windowsHide: true
+    });
+  } catch (error) {
+    return '';
+  }
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+function splitCommandLines(output) {
+  return uniqueStrings(String(output || '').split(/\r?\n/g));
+}
+
+function detectNvidiaDevices() {
+  const output = safeExecFile('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], 3000);
+  const nvidiaSmiDevices = splitCommandLines(output);
+  if (nvidiaSmiDevices.length > 0) return nvidiaSmiDevices;
+  if (os.platform() === 'win32') {
+    return getWindowsVideoControllerNames().filter(line => /nvidia/i.test(line));
+  }
+  return [];
+}
+
+function getWindowsVideoControllerNames() {
+  const command = '(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join [Environment]::NewLine';
+  const powershellOutput = safeExecFile('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    command
+  ], 5000);
+  if (powershellOutput.trim()) return splitCommandLines(powershellOutput);
+
+  const wmicOutput = safeExecFile('wmic.exe', ['path', 'win32_VideoController', 'get', 'name'], 5000);
+  return splitCommandLines(wmicOutput).filter(line => !/^name$/i.test(line));
+}
+
+function detectAmdDevices() {
+  const platform = os.platform();
+  let deviceLines = [];
+
+  if (platform === 'win32') {
+    deviceLines = getWindowsVideoControllerNames();
+  } else if (platform === 'linux') {
+    deviceLines = splitCommandLines(safeExecFile('lspci', [], 3000));
+  }
+
+  return deviceLines.filter(line => /(amd|radeon|advanced micro devices)/i.test(line));
+}
+
+function detectAcceleratedHardware() {
+  const platform = os.platform();
+  const arch = os.arch();
+  const hardwareBackends = [];
+  const devices = [];
+
+  if (platform === 'darwin') {
+    if (arch === 'arm64') {
+      hardwareBackends.push('metal');
+      devices.push({ vendor: 'apple', backend: 'metal', name: 'Apple Silicon' });
+    }
+  } else if (platform === 'win32' || platform === 'linux') {
+    for (const name of detectNvidiaDevices()) {
+      hardwareBackends.push('cuda');
+      devices.push({ vendor: 'nvidia', backend: 'cuda', name });
+    }
+
+    for (const name of detectAmdDevices()) {
+      hardwareBackends.push('vulkan');
+      devices.push({ vendor: 'amd', backend: 'vulkan', name });
+    }
+  }
+
+  const supportedBackends = uniqueStrings(hardwareBackends);
+  return {
+    platform,
+    arch,
+    supportedBackends,
+    devices,
+    supported: supportedBackends.length > 0,
+    unsupportedReason: supportedBackends.length > 0
+      ? null
+      : 'Word-for-Word captions require NVIDIA CUDA, AMD Vulkan, or Apple Silicon Metal. CPU-only ASR is not supported.'
+  };
+}
+
+function getRuntimeFileNames(whisperCliPath) {
+  if (!isPathLike(whisperCliPath)) return [];
+  const runtimeDir = path.dirname(whisperCliPath);
+  try {
+    return fs.readdirSync(runtimeDir).map(fileName => fileName.toLowerCase());
+  } catch (error) {
+    return [];
+  }
+}
+
+function inferWhisperRuntimeBackend(whisperCliPath, whisperProbe) {
+  const platform = os.platform();
+  const runtimePath = String(whisperCliPath || '').toLowerCase();
+  const fileNames = getRuntimeFileNames(whisperCliPath);
+  const probeOutput = `${whisperProbe?.stdout || ''}\n${whisperProbe?.stderr || ''}`.toLowerCase();
+
+  if (platform === 'darwin') {
+    return os.arch() === 'arm64' ? 'metal' : 'cpu';
+  }
+
+  if (fileNames.some(fileName => fileName.includes('ggml-cuda') || fileName.includes('cublas'))
+    || runtimePath.includes('cuda')
+    || runtimePath.includes('cublas')
+    || /cuda|cublas/.test(probeOutput)) {
+    return 'cuda';
+  }
+
+  if (fileNames.some(fileName => fileName.includes('ggml-vulkan') || fileName === 'vulkan-1.dll')
+    || runtimePath.includes('vulkan')
+    || /vulkan/.test(probeOutput)) {
+    return 'vulkan';
+  }
+
+  if (fileNames.some(fileName => fileName.includes('ggml-metal'))
+    || runtimePath.includes('metal')
+    || /metal/.test(probeOutput)) {
+    return 'metal';
+  }
+
+  if (fileNames.some(fileName => fileName.includes('ggml-cpu')) || /cpu/.test(probeOutput)) {
+    return 'cpu';
+  }
+
+  return 'unknown';
+}
+
+function getUnsupportedRuntimeReason(runtimeBackend, hardwareInfo) {
+  if (!SUPPORTED_RUNTIME_BACKENDS.has(runtimeBackend)) {
+    if (runtimeBackend === 'cpu') {
+      return 'Installed whisper runtime is CPU-only. Word-for-Word captions require NVIDIA CUDA, AMD Vulkan, or Apple Silicon Metal.';
+    }
+    return 'Installed whisper runtime does not advertise a supported accelerated backend. Word-for-Word captions require NVIDIA CUDA, AMD Vulkan, or Apple Silicon Metal.';
+  }
+
+  if (!hardwareInfo.supportedBackends.includes(runtimeBackend)) {
+    return `Installed whisper runtime requires ${runtimeBackend}, but matching supported hardware was not detected.`;
+  }
+
+  return null;
+}
+
+function buildWhisperRuntimeStatus(whisperInfo, hardwareInfo = detectAcceleratedHardware()) {
+  const whisperProbe = whisperInfo?.probe || null;
+  const whisperInstalled = Boolean(whisperProbe?.ok && whisperInfo?.path);
+  const runtimeBackend = whisperInstalled
+    ? inferWhisperRuntimeBackend(whisperInfo.path, whisperProbe)
+    : 'unknown';
+  const unsupportedReason = whisperInstalled
+    ? getUnsupportedRuntimeReason(runtimeBackend, hardwareInfo)
+    : 'Whisper runtime is not installed or failed its startup check.';
+  const asrSupported = whisperInstalled && !unsupportedReason;
+
+  return {
+    hardwareBackends: hardwareInfo.supportedBackends,
+    hardwareDevices: hardwareInfo.devices,
+    hardwareSupported: hardwareInfo.supported,
+    runtimeBackend,
+    runtimeFlavor: runtimeBackend,
+    runtimeSupported: asrSupported,
+    asrSupported,
+    selectedBackend: asrSupported ? runtimeBackend : null,
+    gpuBackend: runtimeBackend || 'unknown',
+    unsupportedReason: unsupportedReason || null
+  };
+}
+
 function resolveWhisperCli() {
   const candidates = getWhisperCliCandidates();
+  const hardwareInfo = detectAcceleratedHardware();
+  const resolved = [];
   let fallback = null;
 
   for (const candidate of candidates) {
@@ -214,7 +401,10 @@ function resolveWhisperCli() {
 
     const probe = probeWhisperCli(candidate);
     if (probe.ok) {
-      return { path: candidate, candidates, probe };
+      const whisperInfo = { path: candidate, candidates, probe };
+      whisperInfo.runtimeStatus = buildWhisperRuntimeStatus(whisperInfo, hardwareInfo);
+      resolved.push(whisperInfo);
+      continue;
     }
 
     if (!fallback && isPathLike(candidate) && fs.existsSync(candidate)) {
@@ -222,7 +412,16 @@ function resolveWhisperCli() {
     }
   }
 
-  return fallback || { path: null, candidates, probe: null };
+  for (const backend of hardwareInfo.supportedBackends) {
+    const match = resolved.find(info => info.runtimeStatus?.asrSupported && info.runtimeStatus.runtimeBackend === backend);
+    if (match) return match;
+  }
+
+  const supportedRuntime = resolved.find(info => info.runtimeStatus?.asrSupported);
+  if (supportedRuntime) return supportedRuntime;
+
+  if (resolved.length > 0) return resolved[0];
+  return fallback || { path: null, candidates, probe: null, runtimeStatus: buildWhisperRuntimeStatus(null, hardwareInfo) };
 }
 
 function getWindowsLocalAppDataModelsDir() {
@@ -501,8 +700,14 @@ function transcribeFileWithWhisper({
     const lang = language || 'auto';
     const resolvedModelPath = resolveModelPath(modelPath, modelId);
     const whisperInfo = resolveWhisperCli();
-    if (!whisperInfo.path) {
+    if (!whisperInfo.path || !whisperInfo.probe?.ok) {
       reject(new Error(`Whisper runtime not found. Checked: ${whisperInfo.candidates.join(', ')}`));
+      return;
+    }
+
+    const runtimeStatus = whisperInfo.runtimeStatus || buildWhisperRuntimeStatus(whisperInfo);
+    if (!runtimeStatus.asrSupported) {
+      reject(new Error(runtimeStatus.unsupportedReason || 'Whisper runtime is not configured for a supported accelerated backend.'));
       return;
     }
 
@@ -1166,9 +1371,11 @@ function handleStatus(push) {
 
   const models = listInstalledModels();
   const activeModel = models[0] || null;
-  const gpuBackend = whisperInstalled ? detectGpuBackend(whisperInfo.path) : 'unknown';
-  const health = whisperInstalled ? 'ok' : 'degraded';
-  const installState = whisperInstalled ? 'installed' : 'installed-degraded';
+  const runtimeStatus = whisperInfo.runtimeStatus || buildWhisperRuntimeStatus(whisperInfo);
+  const gpuBackend = runtimeStatus.gpuBackend || 'unknown';
+  const health = whisperInstalled && runtimeStatus.asrSupported ? 'ok' : 'degraded';
+  const installState = health === 'ok' ? 'installed' : 'installed-degraded';
+  const errors = [whisperError, runtimeStatus.unsupportedReason].filter(Boolean);
 
   push({
     type: 'status',
@@ -1190,76 +1397,23 @@ function handleStatus(push) {
     whisperPath: whisperInfo.path || null,
     whisperProbe,
     gpuBackend,
-    errors: whisperError ? [whisperError] : []
+    hardwareBackends: runtimeStatus.hardwareBackends,
+    hardwareDevices: runtimeStatus.hardwareDevices,
+    hardwareSupported: runtimeStatus.hardwareSupported,
+    runtimeBackend: runtimeStatus.runtimeBackend,
+    runtimeFlavor: runtimeStatus.runtimeFlavor,
+    runtimeSupported: runtimeStatus.runtimeSupported,
+    asrSupported: runtimeStatus.asrSupported,
+    selectedBackend: runtimeStatus.selectedBackend,
+    unsupportedReason: runtimeStatus.unsupportedReason,
+    acceleratedBackendsRequired: true,
+    errors
   });
 
-  if (whisperInstalled) {
-    log('Status check: host reachable, whisper installed, models=' + models.length + ', gpu=' + gpuBackend);
+  if (whisperInstalled && runtimeStatus.asrSupported) {
+    log('Status check: host reachable, accelerated whisper installed, models=' + models.length + ', backend=' + gpuBackend);
   } else {
-    log('Status check: host reachable, whisper missing - ' + whisperError);
-  }
-}
-
-/**
- * Detect the GPU backend for whisper.cpp
- * Returns: 'metal' | 'cuda' | 'vulkan' | 'cpu' | 'unknown'
- */
-function detectGpuBackend(whisperCliPath) {
-  try {
-    // Check the platform first
-    const platform = os.platform();
-    
-    // On macOS, whisper.cpp uses Metal by default if available
-    if (platform === 'darwin') {
-      // Check if Metal is available by running whisper-cli with GPU flag
-      try {
-        const probe = probeWhisperCli(whisperCliPath);
-        const output = `${probe.stdout || ''}\n${probe.stderr || ''}`;
-        // If whisper.cpp was built with Metal support, it will show in help
-        if (output.includes('gpu') || output.includes('metal') || output.includes('-ng')) {
-          // Check if we're on Apple Silicon
-          const arch = os.arch();
-          if (arch === 'arm64') {
-            return 'metal';
-          }
-          // Intel Mac - check if Metal is supported
-          return 'metal';
-        }
-      } catch (e) {
-        // Fall through to CPU
-      }
-      return 'cpu';
-    }
-    
-    // On Linux/Windows, check for CUDA or Vulkan
-    if (platform === 'linux' || platform === 'win32') {
-      try {
-        // Check for CUDA
-        const nvidiaSmi = execSync('nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null', { encoding: 'utf-8' });
-        if (nvidiaSmi.trim()) {
-          return 'cuda';
-        }
-      } catch (e) {
-        // No NVIDIA GPU
-      }
-      
-      try {
-        // Check for Vulkan
-        const vulkanInfo = execSync('vulkaninfo --summary 2>/dev/null | head -5', { encoding: 'utf-8' });
-        if (vulkanInfo.includes('GPU')) {
-          return 'vulkan';
-        }
-      } catch (e) {
-        // No Vulkan
-      }
-      
-      return 'cpu';
-    }
-    
-    return 'unknown';
-  } catch (e) {
-    log('GPU backend detection error: ' + e.message);
-    return 'unknown';
+    log('Status check: host reachable, ASR degraded - ' + errors.join(' | '));
   }
 }
 
