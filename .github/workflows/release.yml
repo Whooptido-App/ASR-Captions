@@ -251,34 +251,97 @@ jobs:
           git clone --depth 1 --branch $env:WHISPER_CPP_VERSION https://github.com/ggml-org/whisper.cpp.git $sourcePath
           "WHISPER_CPP_SOURCE=$sourcePath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Download NVIDIA CUDA whisper.cpp Windows runtime
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+
+      - name: Build NVIDIA CUDA whisper.cpp Windows runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $runtimePath = Join-Path $env:GITHUB_WORKSPACE 'dist\whisper-runtime-cuda'
-          $runtimeZip = Join-Path $env:RUNNER_TEMP 'whisper-cublas-12.4.0-bin-x64.zip'
-          $extractPath = Join-Path $env:RUNNER_TEMP 'whisper-cublas-12.4.0-bin-x64'
-          $runtimeUrl = "https://github.com/ggml-org/whisper.cpp/releases/download/$env:WHISPER_CPP_VERSION/whisper-cublas-12.4.0-bin-x64.zip"
-
-          Invoke-WebRequest -Uri $runtimeUrl -OutFile $runtimeZip -UseBasicParsing
-          Expand-Archive -Path $runtimeZip -DestinationPath $extractPath -Force
-
-          $runtimeSource = Join-Path $extractPath 'Release'
-          if (-not (Test-Path -LiteralPath $runtimeSource)) {
-            $runtimeSource = $extractPath
+          $sourcePath = $env:WHISPER_CPP_SOURCE
+          $buildPath = Join-Path $env:RUNNER_TEMP 'whisper.cpp-cuda-build'
+          $cudaBin = Join-Path $env:CUDA_PATH 'bin'
+          if (-not (Test-Path -LiteralPath $cudaBin)) {
+            throw "CUDA Toolkit bin directory was not found: $cudaBin"
           }
+
+          cmake `
+            -S $sourcePath `
+            -B $buildPath `
+            -A x64 `
+            -DWHISPER_BUILD_TESTS=OFF `
+            -DWHISPER_BUILD_EXAMPLES=ON `
+            -DWHISPER_BUILD_SERVER=OFF `
+            -DWHISPER_CURL=OFF `
+            -DWHISPER_SDL2=OFF `
+            -DWHISPER_OPENVINO=OFF `
+            -DGGML_NATIVE=OFF `
+            -DGGML_SSE42=OFF `
+            -DGGML_AVX=OFF `
+            -DGGML_AVX2=OFF `
+            -DGGML_BMI2=OFF `
+            -DGGML_FMA=OFF `
+            -DGGML_F16C=OFF `
+            -DGGML_AVX512=OFF `
+            -DGGML_BLAS=OFF `
+            -DGGML_OPENMP=OFF `
+            -DGGML_VULKAN=OFF `
+            -DGGML_CUDA=ON `
+            -DGGML_CPU_ALL_VARIANTS=OFF `
+            "-DCMAKE_CUDA_ARCHITECTURES=61;75;86;89"
+
+          cmake --build $buildPath --config Release --target whisper-cli --parallel
 
           New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
-          Copy-Item -Path (Join-Path $runtimeSource '*') -Destination $runtimePath -Recurse -Force
+
+          $requiredBuildFiles = @(
+            'whisper-cli.exe',
+            'whisper.dll',
+            'ggml.dll',
+            'ggml-base.dll',
+            'ggml-cpu.dll',
+            'ggml-cuda.dll'
+          )
+          foreach ($fileName in $requiredBuildFiles) {
+            $file = Get-ChildItem -LiteralPath $buildPath -Recurse -File -Filter $fileName | Select-Object -First 1
+            if (-not $file) {
+              throw "$fileName was not produced by the CUDA whisper.cpp build"
+            }
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $runtimePath $file.Name) -Force
+          }
+
+          $cudaRedistributablePatterns = @(
+            'cudart64_*.dll',
+            'cublas64_*.dll',
+            'cublasLt64_*.dll',
+            'nvrtc64_*.dll',
+            'nvrtc-builtins64_*.dll'
+          )
+          foreach ($pattern in $cudaRedistributablePatterns) {
+            $files = Get-ChildItem -LiteralPath $cudaBin -File -Filter $pattern
+            foreach ($file in $files) {
+              Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $runtimePath $file.Name) -Force
+            }
+          }
 
           if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'whisper-cli.exe'))) {
-            throw 'whisper-cli.exe was not found in the CUDA runtime package'
+            throw 'whisper-cli.exe was not found in the generated CUDA runtime package'
           }
           if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'ggml-cuda.dll'))) {
-            throw 'ggml-cuda.dll was not found in the CUDA runtime package'
+            throw 'ggml-cuda.dll was not found in the generated CUDA runtime package'
           }
           if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'cublas64_12.dll'))) {
-            throw 'cublas64_12.dll was not found in the CUDA runtime package'
+            throw 'cublas64_12.dll was not found in the generated CUDA runtime package'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'cublasLt64_12.dll'))) {
+            throw 'cublasLt64_12.dll was not found in the generated CUDA runtime package'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $runtimePath 'cudart64_12.dll'))) {
+            throw 'cudart64_12.dll was not found in the generated CUDA runtime package'
           }
 
           Write-Host 'Skipping CUDA whisper-cli launch probe on GitHub runners because ggml-cuda.dll imports nvcuda.dll from the NVIDIA driver.'

@@ -23,7 +23,7 @@ const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo-q5_0.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
-const HOST_VERSION = '1.0.0-beta.14';
+const HOST_VERSION = '1.0.0-beta.15';
 const SUPPORTED_RUNTIME_BACKENDS = new Set(['cuda', 'vulkan', 'metal']);
 const MODEL_QUALITY_RANK = Object.freeze({
   'small': 100,
