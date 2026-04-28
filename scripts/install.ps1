@@ -118,13 +118,20 @@ Write-Step "Downloading accelerated whisper.cpp runtime..."
 $RuntimeDir = Join-Path $InstallDir "whisper"
 $RuntimeZip = Join-Path $env:TEMP $WhisperRuntimeAsset
 $RuntimeExtract = Join-Path $env:TEMP "whooptido-whisper-runtime-windows-x64-$($RuntimeSelection.Backend)"
+$StaleRuntimeDirs = @(
+  (Join-Path $InstallDir "whisper"),
+  (Join-Path $InstallDir "whisper-cuda"),
+  (Join-Path $InstallDir "whisper-vulkan")
+)
 
 try {
   if (Test-Path -LiteralPath $RuntimeExtract) {
     Remove-Item -LiteralPath $RuntimeExtract -Recurse -Force
   }
-  if (Test-Path -LiteralPath $RuntimeDir) {
-    Remove-Item -LiteralPath $RuntimeDir -Recurse -Force
+  foreach ($StaleRuntimeDir in $StaleRuntimeDirs) {
+    if (Test-Path -LiteralPath $StaleRuntimeDir) {
+      Remove-Item -LiteralPath $StaleRuntimeDir -Recurse -Force
+    }
   }
   New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
   Invoke-WebRequest -Uri $WhisperRuntimeUrl -OutFile $RuntimeZip -UseBasicParsing

@@ -23,7 +23,7 @@ const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo-q5_0.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
-const HOST_VERSION = '1.0.0-beta.13';
+const HOST_VERSION = '1.0.0-beta.14';
 const SUPPORTED_RUNTIME_BACKENDS = new Set(['cuda', 'vulkan', 'metal']);
 const MODEL_QUALITY_RANK = Object.freeze({
   'small': 100,
@@ -82,12 +82,19 @@ function getWhisperCliCandidates() {
     candidates.push(process.env[WHISPER_CLI_ENV]);
   }
 
-  candidates.push(
-    path.join(installDir, 'whisper', executableName),
-    path.join(installDir, 'whisper-cuda', executableName),
-    path.join(installDir, 'whisper-vulkan', executableName),
-    path.join(installDir, executableName)
-  );
+  if (platform === 'win32') {
+    candidates.push(
+      path.join(installDir, 'whisper-cuda', executableName),
+      path.join(installDir, 'whisper-vulkan', executableName),
+      path.join(installDir, 'whisper', executableName),
+      path.join(installDir, executableName)
+    );
+  } else {
+    candidates.push(
+      path.join(installDir, 'whisper', executableName),
+      path.join(installDir, executableName)
+    );
+  }
 
   if (platform === 'darwin') {
     candidates.push('/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli');
@@ -363,6 +370,14 @@ function getUnsupportedRuntimeReason(runtimeBackend, hardwareInfo) {
   return null;
 }
 
+function inferCandidateRuntimeBackend(candidate) {
+  const normalized = String(candidate || '').toLowerCase();
+  if (normalized.includes('whisper-cuda') || normalized.includes('cuda') || normalized.includes('cublas')) return 'cuda';
+  if (normalized.includes('whisper-vulkan') || normalized.includes('vulkan')) return 'vulkan';
+  if (normalized.includes('whisper-metal') || normalized.includes('metal')) return 'metal';
+  return null;
+}
+
 function buildWhisperRuntimeStatus(whisperInfo, hardwareInfo = detectAcceleratedHardware()) {
   const whisperProbe = whisperInfo?.probe || null;
   const whisperInstalled = Boolean(whisperProbe?.ok && whisperInfo?.path);
@@ -392,6 +407,7 @@ function resolveWhisperCli() {
   const candidates = getWhisperCliCandidates();
   const hardwareInfo = detectAcceleratedHardware();
   const resolved = [];
+  const failedAccelerated = [];
   let fallback = null;
 
   for (const candidate of candidates) {
@@ -407,6 +423,11 @@ function resolveWhisperCli() {
       continue;
     }
 
+    const candidateBackend = inferCandidateRuntimeBackend(candidate);
+    if (candidateBackend && hardwareInfo.supportedBackends.includes(candidateBackend)) {
+      failedAccelerated.push({ path: candidate, candidates, probe });
+    }
+
     if (!fallback && isPathLike(candidate) && fs.existsSync(candidate)) {
       fallback = { path: candidate, candidates, probe };
     }
@@ -419,6 +440,8 @@ function resolveWhisperCli() {
 
   const supportedRuntime = resolved.find(info => info.runtimeStatus?.asrSupported);
   if (supportedRuntime) return supportedRuntime;
+
+  if (failedAccelerated.length > 0) return failedAccelerated[0];
 
   if (resolved.length > 0) return resolved[0];
   return fallback || { path: null, candidates, probe: null, runtimeStatus: buildWhisperRuntimeStatus(null, hardwareInfo) };

@@ -47,11 +47,28 @@ Source: "..\dist\whisper-runtime-vulkan\*"; DestDir: "{app}\whisper-vulkan"; Fla
 ; Register the native messaging host with Chrome
 Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.whooptido.companion"; ValueType: string; ValueName: ""; ValueData: "{app}\com.whooptido.companion.json"; Flags: uninsdeletekey
 
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\whisper"
+Type: filesandordirs; Name: "{app}\whisper-cuda"
+Type: filesandordirs; Name: "{app}\whisper-vulkan"
+Type: files; Name: "{app}\whisper-cli.exe"
+Type: files; Name: "{app}\whisper.dll"
+Type: files; Name: "{app}\ggml*.dll"
+Type: files; Name: "{app}\cublas*.dll"
+Type: files; Name: "{app}\cudart*.dll"
+Type: files; Name: "{app}\vulkan-1.dll"
+
 [UninstallDelete]
 Type: files; Name: "{app}\com.whooptido.companion.json"
 Type: filesandordirs; Name: "{app}\whisper"
 Type: filesandordirs; Name: "{app}\whisper-cuda"
 Type: filesandordirs; Name: "{app}\whisper-vulkan"
+Type: files; Name: "{app}\whisper-cli.exe"
+Type: files; Name: "{app}\whisper.dll"
+Type: files; Name: "{app}\ggml*.dll"
+Type: files; Name: "{app}\cublas*.dll"
+Type: files; Name: "{app}\cudart*.dll"
+Type: files; Name: "{app}\vulkan-1.dll"
 
 [Messages]
 WelcomeLabel1=Whooptido ASR Captions
