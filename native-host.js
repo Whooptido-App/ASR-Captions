@@ -23,7 +23,7 @@ const WHOOPTIDO_DIR = path.join(os.homedir(), '.whooptido');
 const MODELS_DIR = path.join(WHOOPTIDO_DIR, 'models');
 const DEFAULT_MODEL = path.join(MODELS_DIR, 'ggml-large-v3-turbo-q5_0.bin');
 const OLD_MODELS_DIR = path.join(os.homedir(), 'whisper-models');
-const HOST_VERSION = '1.0.0-beta.11';
+const HOST_VERSION = '1.0.0-beta.12';
 const MODEL_QUALITY_RANK = Object.freeze({
   'small': 100,
   'medium': 200,
@@ -487,6 +487,7 @@ function transcribeFileWithWhisper({
   language,
   modelId,
   modelPath,
+  mode = 'accurate',
   cleanupPaths = [],
   operationKey = null,
   isCancelled = () => false
@@ -514,19 +515,25 @@ function transcribeFileWithWhisper({
     // Keep one core available by default to reduce machine lockups.
     const threadCount = Math.max(1, Math.min(configuredMaxThreads, Math.max(1, cpuCount - 1)));
     const dtwPreset = getDtwPreset(resolvedModelPath, modelId);
+    const isFastMode = mode === 'fast';
     const args = [
       '-m', resolvedModelPath,
       '-l', lang,
       '-ojf',
       '-t', String(threadCount),
-      '--no-prints',
-      '--dtw', dtwPreset,      // Enable DTW for accurate token-level timestamps
-      '--no-flash-attn',       // DTW requires flash attention disabled
-      '-of', outputBase,
-      audioFilePath
+      '--no-prints'
     ];
 
-    log(`Whisper args: ${args.join(' ')}`);
+    if (!isFastMode) {
+      args.push(
+        '--dtw', dtwPreset,      // Enable DTW for accurate token-level timestamps
+        '--no-flash-attn'        // DTW requires flash attention disabled
+      );
+    }
+
+    args.push('-of', outputBase, audioFilePath);
+
+    log(`Whisper args (${isFastMode ? 'fast' : 'accurate'}): ${args.join(' ')}`);
 
     const startTime = Date.now();
     const whisper = spawn(whisperInfo.path, args, getWhisperExecutionOptions(whisperInfo.path));
@@ -1572,7 +1579,7 @@ function handleTranscribe(msg, push, done) {
 }
 
 function handleTranscribeInit(msg, push, done) {
-  const { id, totalBytes, totalChunks, chunkBytes, language, modelId } = msg;
+  const { id, totalBytes, totalChunks, chunkBytes, language, modelId, mode } = msg;
   if (!id) {
     push({ id, type: 'transcribe_init_ack', error: 'Missing id' });
     done();
@@ -1601,6 +1608,7 @@ function handleTranscribeInit(msg, push, done) {
       textParts: [],
       language,
       modelId,
+      mode: mode === 'fast' ? 'fast' : 'accurate',
       startedAt: Date.now(),
       updatedAt: Date.now(),
       status: 'running',
@@ -1608,7 +1616,7 @@ function handleTranscribeInit(msg, push, done) {
       pauseRequested: false,
       activeOperationKey: null
     });
-    log(`Chunked init: id=${id} totalBytes=${totalBytes} totalChunks=${totalChunks} chunkBytes=${chunkBytes}`);
+    log(`Chunked init: id=${id} totalBytes=${totalBytes} totalChunks=${totalChunks} chunkBytes=${chunkBytes} mode=${mode === 'fast' ? 'fast' : 'accurate'}`);
     push({ id, type: 'transcribe_init_ack', success: true });
   } catch (e) {
     logError(`Chunked init error: ${e.message}`);
@@ -1671,6 +1679,7 @@ function handleTranscribeChunk(msg, push, done) {
         audioFilePath: chunkPath,
         language: session.language,
         modelId: session.modelId,
+        mode: session.mode,
         cleanupPaths: [chunkPath],
         operationKey,
         isCancelled: () => !!chunkSessions.get(id)?.cancelRequested
